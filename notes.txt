@@ -1,0 +1,216 @@
+* Package names
+
+  ccsds
+  rpimages
+
+* Main project
+
+  warp
+
+* Commands
+
+  * Filter command
+    Transforms telemetry data from one format to another
+  
+    warp filter     
+    -c   --config=<filename>
+	 --simulate
+
+    -d   --dictionary|dict=<filename>
+	 --in=<stream_spec>
+	 --format-in=frames|packets|itos_bson|packet_json|prechannelized_json|csv
+	 --out=<stream_spec>
+	 --format-out=frames|packets|itos_bson|packet_json|prechannelized_json|csv|pkt_summary|pkt_contents|pkt_binary|pkt_counts
+	 --out2=<stream_spec>
+	 --format-out2=frames|packets|itos_bson|packet_json|prechannelized_json|csv|pkt_summary|pkt_contents|pkt_binary|pkt_counts
+
+	 --apid-filter=<apid_spec>
+	 --database-path=<database_path>
+	 --session-path=<session_path>
+
+    Where <stream_spec>=
+	 tcp-client[:host][:port]
+	 tcp-server[:port]
+	 udp[:host][:port]
+	 multicast[:host][:port]
+	 file:<filename>
+	 file:'glob_pattern'
+	 dds:??
+	 stdin|stdout|stderr
+	 history[:session][:host][:port][database_path]
+	 session[:host][:port][:session_path]
+
+    Where <apid_spec>=
+	  <int>
+	  <int>-<int>  range
+	  !<apid_spec>
+	  <apid_spec>|<apid_spec>
+	  (<apid_spec>)
+
+  * Import command
+    Import telemetry data into a telemetry history service database
+    
+    warp import     
+    -c   --config=<filename>
+	 --simulate
+    -f   --force
+    -r   --reset
+    -v   --verbose
+    -d   --dictionary
+	 --name=<session_name>
+	 --target=<stream_spec>
+	 --source=<file_pattern>
+
+    Where <stream_spec> includes file, history and session types.
+
+  * Session Command
+    Runs a telemetry history service for a single session using local storage for the db
+
+    warp session [options] SESSION_PATH
+
+    Options:
+    -c   --config=<filename>
+	 --simulate
+	 --rest-port=<int>
+	 --ws-port=<int>
+	 --touch
+	 --create <stream_spec>
+	 --dictionary <dictionary_file>
+
+  * Get command
+    Retrieve and format data from a history or session server
+
+    warp get        
+    -c   --config=<filename>
+	 --simulate
+
+    -d   --dictionary|dict=<filename>
+	 --in=<stream_spec>
+	 --format-in=frames|packets|itos_bson|packet_json|prechannelized_json|csv
+	 --out=<stream_spec>
+	 --format-out=frames|packets|itos_bson|packet_json|prechannelized_json|csv|pkt_summary|pkt_contents|pkt_binary|pkt_counts
+	 --out2=<stream_spec>
+	 --format-out2=frames|packets|itos_bson|packet_json|prechannelized_json|csv|pkt_summary|pkt_contents|pkt_binary|pkt_counts
+
+	 --apid-filter=<apid_spec>
+	 --database-path=<database_directory>
+	 --session-path=<session_directory_or_db_file>
+
+  * Realtime command
+
+  warp realtime   Run a real-time telemetry service
+  -c   --config=<filename>
+       --simulate
+  -d   --dictionary|dict=<filename>
+       --in=<stream_spec>
+       --format-in=frames|packets|itos_bson|packet_json|prechannelized_json|csv
+       --out=<stream_spec>
+       --format-out=frames|packets|itos_bson|packet_json|prechannelized_json|csv|pkt_summary|pkt_contents|pkt_binary|pkt_counts
+       --out2=<stream_spec>
+       --format-out2=frames|packets|itos_bson|packet_json|prechannelized_json|csv|pkt_summary|pkt_contents|pkt_binary|pkt_counts
+
+       --database=<database_path>
+
+       --image-dir=<dir>
+       --image-url=<url>
+       --image-version=v1|v2|none
+       --packet-release-rate=<float>
+       --reconnect=<int>
+       --ws-port=<port>
+
+  -v   --verbose=true|false
+  -b   --bit-rate=<float>
+
+  warp describe   Describe a database, session or telemetry file
+  -c   --config=<filename>
+       --simulate
+  -v   --verbose
+       --source=<stream_spec>
+
+  warp history    Run a telemetry history service (multiple sessions)
+  -c   --config=<filename>
+       --simulate
+  -d   --database=<directory>
+  -r   --root=<directory>
+  -p   --port=<int>
+       --ssl=true|false   <-- maybe not
+
+
+  warp wget    Fetch data from a URL and print to standard output
+  -c   --config=<filename>
+       --simulate
+  -u   --url=<url>
+
+  warp config  Manage a warp config file
+  -c   --config=<filename>
+       --simulate
+	   --rm
+	   --remove
+	   --defaults
+  -s   --set
+  -u   --unset
+       --show-all
+	   --show=<substring>
+
+  warp set     Manage config file in working directory
+  -c   --config=<filename>
+       --simulate
+  -n   --name=<variable_name>
+  -v   --value=<value>
+
+  warp unset   Manage config file in working directory
+  -c   --config=<filename>
+       --simulate
+  -n   --name=<variable_name>
+
+
+Cliches
+
+"Delete a session from the history root directory (specified in .warp_config.json)"a
+warp import --remove --name session1
+
+"Import data into a new session"
+warp import -d c:/git/developer/warp-history/src/StaticFiles/warp.dictionary.json.gz --name session3 --source c:/RP/data/2015-08-25.short/
+
+"Overwrite data in a session"
+warp import --remove -d c:/git/developer/warp-history/src/StaticFiles/warp.dictionary.json.gz --name session3 --source c:/RP/data/2015-08-25.short/
+
+"Add data to a session"
+warp import --force --name session3 --source c:/RP/data/2015-08-25.short/
+
+
+
+
+from\to                 packets frames  itos_bson       packet_json     prechannelized_json     csv
+packets                 x               x               x               x                       x
+frames                  x       x       x               x               x                       x
+itos_bson                               x               x               x       
+packet_json                             x               x               x                       x
+prechannelized_json                     x               x               x       
+csv                                     x               x               x                       x
+
+ToDo
+* Dictionaries shouldn't be pretty printed
+
+
+
+Old debugging cmd line args
+-v describe -f dot_day3
+hs -v index dot_day3 C:\RP\data\2015-08-25
+
+hs -v import -f -dict c:/git/developer/warp-history/src/StaticFiles/warp.dictionary.json.gz -session dot_day3 C:\RP\data\2015-08-25
+hs -v index -session dot_day3 C:\RP\data\2015-08-25
+hs prepare dot_day3
+hs describe -f dot_day3
+warp wget /history/session1?points=bmsio_brief_dat.STATE_OF_CHARGE
+
+
+
+
+warp import --source=c:/RP/data/2015-08-25.short/ --target=session1
+warp describe --source=session:
+
+
+warp import --remove --name session1
+warp import --touch --name session1
+warp session --name session1 --source=file:c:/RP/data/2015-08-25.short/ --bps=10000
