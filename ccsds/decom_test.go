@@ -28,7 +28,7 @@ func TestF1234(t *testing.T) {
 			packet := Packet(packetbuf)
 
 			point := PointInfo{FieldType: F1234, BitStart: 0, BitStop: 31, ByteOffset: uint(offset), ByteSize: uint(4)}
-			v2, err2 := point.GetValue(packet)
+			v2, err2 := point.GetValue(&packet)
 			if err2 != nil {
 				t.Error("error extracting point value")
 			}
@@ -61,7 +61,7 @@ func TestF12345678(t *testing.T) {
 			packet := Packet(packetbuf)
 
 			point := PointInfo{FieldType: F12345678, BitStart: 0, BitStop: 63, ByteOffset: uint(offset), ByteSize: uint(8)}
-			v2, err2 := point.GetValue(packet)
+			v2, err2 := point.GetValue(&packet)
 			if err2 != nil {
 				t.Error("error extracting point value")
 			}
@@ -91,7 +91,7 @@ func TestI1(t *testing.T) {
 			packet := Packet(packetbuf)
 
 			point := PointInfo{FieldType: I1, BitStart: 0, BitStop: 7, ByteOffset: uint(offset), ByteSize: uint(1)}
-			v2, err2 := point.GetValue(packet)
+			v2, err2 := point.GetValue(&packet)
 			if err2 != nil {
 				t.Error("error extracting point value")
 			}
@@ -124,7 +124,7 @@ func TestI12(t *testing.T) {
 			packet := Packet(packetbuf)
 
 			point := PointInfo{FieldType: I12, BitStart: 0, BitStop: 15, ByteOffset: uint(offset), ByteSize: uint(2)}
-			v2, err2 := point.GetValue(packet)
+			v2, err2 := point.GetValue(&packet)
 			if err2 != nil {
 				t.Error("error extracting point value")
 			}
@@ -200,7 +200,7 @@ func TestS1(t *testing.T) {
 			}
 
 			point1 := PointInfo{FieldType: S1, BitStart: 0, BitStop: 15, ByteOffset: uint(offset + 6), ByteSize: uint(len(v1))}
-			v2, err2 := point1.GetValue(packet)
+			v2, err2 := point1.GetValue(&packet)
 			if err2 != nil {
 				t.Error("error extracting point value")
 			}
@@ -210,7 +210,7 @@ func TestS1(t *testing.T) {
 			}
 
 			point3 := PointInfo{FieldType: URL, BitStart: 0, BitStop: 15, ByteOffset: uint(offset + 6), ByteSize: uint(len(v1))}
-			v3, err3 := point3.GetValue(packet)
+			v3, err3 := point3.GetValue(&packet)
 			if err3 != nil {
 				t.Error("error extracting point value")
 			}

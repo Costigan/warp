@@ -9,18 +9,20 @@ import (
 	"os"
 	"path"
 	"unsafe"
+
+	"reflect"
 )
 
 // TelemetryDictionary describes a list of packets each containing a list of points
 type TelemetryDictionary struct {
-	Packets          []PacketInfo
-	Units            []string
+	Packets          []*PacketInfo
+	Units            []*string
 	FirstEnum        string
 	LastEnum         string
-	ListConversions  []DiscreteConversionList
-	MapConversions   []DiscreteConversionMap
-	RangeConversions []DiscreteConversionRangeList
-	PolyConversions  []PolynomialConversion
+	ListConversions  []*DiscreteConversionList
+	MapConversions   []*DiscreteConversionMap
+	RangeConversions []*DiscreteConversionRangeList
+	PolyConversions  []*PolynomialConversion
 	PacketLookup     [2048]*PacketInfo
 }
 
@@ -31,7 +33,7 @@ type PacketInfo struct {
 	ID            string `json:"Id"`
 	IsTable       bool
 	Name          string
-	Points        []PointInfo
+	Points        []*PointInfo
 }
 
 // PointInfo describes a single telemetry point, providing the information needed to extract its value from a binary packet
@@ -55,6 +57,7 @@ type PointInfo struct {
 // Conversions
 //
 
+// ConversionName is a holder for the name of conversions in the serialized dictionary
 type ConversionName struct {
 	Name string
 }
@@ -66,18 +69,22 @@ type IConversion interface {
 	ReturnedType() byte
 }
 
+// ConversionBase is the base struct for conversions
 type ConversionBase struct {
 	Name string
 }
 
+// GetName returns the name of this conversion
 func (c *ConversionBase) GetName() string {
 	return c.Name
 }
 
+// IdentityConversion returns the raw value
 type IdentityConversion struct {
 	ConversionBase
 }
 
+// ReturnedType indicates what type the conversion will return.  To be passed to warp
 func (c *IdentityConversion) ReturnedType() byte {
 	return Raw
 }
@@ -90,10 +97,12 @@ func (c *IdentityConversion) convert(v interface{}) (interface{}, error) {
 // Time conversions
 //
 
+// Time42Conversion converts timestamps to an ITOS-compatible string
 type Time42Conversion struct {
 	ConversionBase
 }
 
+// ReturnedType indicates what type the conversion will return.  To be passed to warp
 func (c *Time42Conversion) ReturnedType() byte {
 	return String
 }
@@ -115,20 +124,47 @@ type DiscreteConversionList struct {
 	LowIndex int
 }
 
+// ReturnedType indicates what type the conversion will return.  To be passed to warp
 func (c *DiscreteConversionList) ReturnedType() byte {
 	return Enum
 }
 
 func (c *DiscreteConversionList) convert(v interface{}) (interface{}, error) {
-	raw, ok := v.(int)
-	if !ok {
-		return "Illegal_conversion", nil
+	if v1, ok := toint(v); ok {
+		var idx = v1 - c.LowIndex
+		if idx >= 0 && idx < len(c.Values) {
+			return c.Values[idx], nil
+		}
+		return fmt.Sprintf("Illegal_conversion raw value out-of-range %v", v), nil
 	}
-	var idx = raw - c.LowIndex
-	if idx >= 0 && idx < len(c.Values) {
-		return c.Values[idx], nil
+	return fmt.Sprintf("Illegal_conversion invalid raw type for conversion: %s", reflect.TypeOf(v).String()), nil
+}
+
+// Int returns v's underlying value, as an int64.
+// It panics if v's Kind is not Int, Int8, Int16, Int32, or Int64.
+func toint(v interface{}) (int, bool) {
+	switch v1 := v.(type) {
+	case uint8:
+		return int(v1), true
+	case uint16:
+		return int(v1), true
+	case uint32:
+		return int(v1), true
+	case uint64:
+		return int(v1), true
+	case int:
+		return int(v1), true
+	case int8:
+		return int(v1), true
+	case int16:
+		return int(v1), true
+	case int32:
+		return int(v1), true
+	case int64:
+		return int(v1), true
+	default:
+		return 0, false
 	}
-	return "Illegal_conversion", nil
 }
 
 // DiscreteConversionMap describes an enumeration non-contiguous set of values
@@ -138,21 +174,21 @@ type DiscreteConversionMap struct {
 	Indices []int
 }
 
+// ReturnedType indicates what type the conversion will return.  To be passed to warp
 func (c *DiscreteConversionMap) ReturnedType() byte {
 	return Enum
 }
 
 func (c *DiscreteConversionMap) convert(v interface{}) (interface{}, error) {
-	raw, ok := v.(int)
-	if !ok {
-		return "Illegal_conversion", nil
-	}
-	for i := range c.Indices {
-		if c.Indices[i] == raw {
-			return c.Values[i], nil
+	if v1, ok := toint(v); ok {
+		for i := range c.Indices {
+			if c.Indices[i] == v1 {
+				return c.Values[i], nil
+			}
 		}
+		return fmt.Sprintf("Illegal_conversion raw value out-of-range %v", v), nil
 	}
-	return "Illegal_conversion", nil
+	return fmt.Sprintf("Illegal_conversion invalid raw type for conversion: %s", reflect.TypeOf(v).String()), nil
 }
 
 // DiscreteConversionRangeList describes an enumeration with multiple values mapping to single strings
@@ -161,21 +197,21 @@ type DiscreteConversionRangeList struct {
 	Ranges []DiscreteConversionRange
 }
 
+// ReturnedType indicates what type the conversion will return.  To be passed to warp
 func (c *DiscreteConversionRangeList) ReturnedType() byte {
 	return Enum
 }
 
 func (c *DiscreteConversionRangeList) convert(v interface{}) (interface{}, error) {
-	raw, ok := v.(int)
-	if !ok {
-		return "Illegal_conversion", nil
-	}
-	for i := range c.Ranges {
-		if c.Ranges[i].Low <= raw && raw <= c.Ranges[i].High {
-			return c.Ranges[i].Value, nil
+	if v1, ok := toint(v); ok {
+		for i := range c.Ranges {
+			if c.Ranges[i].Low <= v1 && v1 <= c.Ranges[i].High {
+				return c.Ranges[i].Value, nil
+			}
 		}
+		return fmt.Sprintf("Illegal_conversion raw value out-of-range %v", v), nil
 	}
-	return "Illegal_conversion", nil
+	return fmt.Sprintf("Illegal_conversion invalid raw type for conversion: %s", reflect.TypeOf(v).String()), nil
 }
 
 // DiscreteConversionRange describes a contiguous range of values that map to a single string; used by DiscreteConversionRangeList
@@ -194,11 +230,12 @@ type PolynomialConversion struct {
 	Coefficients []float64
 }
 
+// ReturnedType indicates what type the conversion will return.  To be passed to warp
 func (c *PolynomialConversion) ReturnedType() byte {
 	return Number
 }
 
-func (conv *PolynomialConversion) convert(v interface{}) (interface{}, error) {
+func (c *PolynomialConversion) convert(v interface{}) (interface{}, error) {
 	var raw float64
 	switch v1 := v.(type) {
 	case float32:
@@ -206,7 +243,7 @@ func (conv *PolynomialConversion) convert(v interface{}) (interface{}, error) {
 	case float64:
 		raw = float64(v1)
 	case string:
-		return "Illegal_conversion", nil
+		return "Illegal_conversion_7", nil
 	case byte:
 		raw = float64(v1)
 	case int16:
@@ -222,93 +259,93 @@ func (conv *PolynomialConversion) convert(v interface{}) (interface{}, error) {
 	case uint64:
 		raw = float64(v1)
 	default:
-		return "Illegal_conversion", nil
+		return "Illegal_conversion_8", nil
 	}
-	c := conv.Coefficients
-	switch order := conv.Order; order {
+	f := c.Coefficients
+	switch order := c.Order; order {
 	case 0:
-		return c[0], nil
+		return f[0], nil
 	case 1:
-		return c[0] + raw*c[1], nil
+		return f[0] + raw*f[1], nil
 	case 2:
-		return c[0] + raw*c[1] + raw*raw*c[2], nil
+		return f[0] + raw*f[1] + raw*raw*f[2], nil
 	case 3:
 		{
-			sum := c[0]
+			sum := f[0]
 			r := raw
-			sum += c[1] * r
+			sum += f[1] * r
 			r *= raw
-			sum += c[2] * r
+			sum += f[2] * r
 			r *= raw
-			sum += c[3] * r
+			sum += f[3] * r
 			return sum, nil
 		}
 	case 4:
 		{
-			sum := c[0]
+			sum := f[0]
 			r := raw
-			sum += c[1] * r
+			sum += f[1] * r
 			r *= raw
-			sum += c[2] * r
+			sum += f[2] * r
 			r *= raw
-			sum += c[3] * r
+			sum += f[3] * r
 			r *= raw
-			sum += c[4] * r
+			sum += f[4] * r
 			return sum, nil
 		}
 	case 5:
 		{
-			sum := c[0]
+			sum := f[0]
 			r := raw
-			sum += c[1] * r
+			sum += f[1] * r
 			r *= raw
-			sum += c[2] * r
+			sum += f[2] * r
 			r *= raw
-			sum += c[3] * r
+			sum += f[3] * r
 			r *= raw
-			sum += c[4] * r
+			sum += f[4] * r
 			r *= raw
-			sum += c[5] * r
+			sum += f[5] * r
 			return sum, nil
 		}
 	case 6:
 		{
-			sum := c[0]
+			sum := f[0]
 			r := raw
-			sum += c[1] * r
+			sum += f[1] * r
 			r *= raw
-			sum += c[2] * r
+			sum += f[2] * r
 			r *= raw
-			sum += c[3] * r
+			sum += f[3] * r
 			r *= raw
-			sum += c[4] * r
+			sum += f[4] * r
 			r *= raw
-			sum += c[5] * r
+			sum += f[5] * r
 			r *= raw
-			sum += c[6] * r
+			sum += f[6] * r
 			return sum, nil
 		}
 	case 7:
 		{
-			sum := c[0]
+			sum := f[0]
 			r := raw
-			sum += c[1] * r
+			sum += f[1] * r
 			r *= raw
-			sum += c[2] * r
+			sum += f[2] * r
 			r *= raw
-			sum += c[3] * r
+			sum += f[3] * r
 			r *= raw
-			sum += c[4] * r
+			sum += f[4] * r
 			r *= raw
-			sum += c[5] * r
+			sum += f[5] * r
 			r *= raw
-			sum += c[6] * r
+			sum += f[6] * r
 			r *= raw
-			sum += c[7] * r
+			sum += f[7] * r
 			return sum, nil
 		}
 	default:
-		return "Illegal_conversion", nil
+		return "Illegal_conversion_9", nil
 	}
 }
 
@@ -370,10 +407,6 @@ func (point *PointInfo) GetValue(p *Packet) (v interface{}, err error) {
 	raw, err := point.GetRawValue(p)
 	if err != nil {
 		return nil, fmt.Errorf("Decomm raw extraction error in %s: %v", point.Name, err)
-	}
-
-	if point.ID == "hazcamio_dat.CCSDS_TIME_324" {
-		fmt.Println("here")
 	}
 
 	if point.Conversion == nil {
@@ -694,7 +727,7 @@ func LoadDictionary(filename string) (*TelemetryDictionary, error) {
 		// This silently ignores tables and malformed apids.  Maybe this should say something
 		if apid >= 0 && apid < 2048 {
 			if dictionary.PacketLookup[apid] == nil {
-				dictionary.PacketLookup[apid] = &dictionary.Packets[i]
+				dictionary.PacketLookup[apid] = dictionary.Packets[i]
 			}
 		}
 	}
@@ -707,31 +740,24 @@ func LoadDictionary(filename string) (*TelemetryDictionary, error) {
 func propagateConverters(dictionary *TelemetryDictionary) {
 	m := make(map[string]IConversion)
 	for i, c := range dictionary.ListConversions {
-		m[c.Name] = &dictionary.ListConversions[i]
+		m[c.Name] = dictionary.ListConversions[i]
 	}
 	for i, c := range dictionary.MapConversions {
-		m[c.Name] = &dictionary.MapConversions[i]
+		m[c.Name] = dictionary.MapConversions[i]
 	}
 	for i, c := range dictionary.RangeConversions {
-		m[c.Name] = &dictionary.RangeConversions[i]
+		m[c.Name] = dictionary.RangeConversions[i]
 	}
 	for i, c := range dictionary.PolyConversions {
-		m[c.Name] = &dictionary.PolyConversions[i]
+		m[c.Name] = dictionary.PolyConversions[i]
 	}
 
 	for _, pkt := range dictionary.Packets {
-		for j, point := range pkt.Points {
-
-			if point.ID == "hazcamio_dat.CCSDS_TIME_324" {
-				fmt.Println("here")
-			}
+		for _, point := range pkt.Points {
 
 			// Handle time conversions
 			if point.FieldType == TIME42 {
 				point.Conversion = time42ConversionSingleton
-				if pkt.Points[j].Conversion == nil {
-					fmt.Println("there")
-				}
 			}
 
 			f := point.ConversionFunction
