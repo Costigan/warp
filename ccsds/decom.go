@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"path"
+	"sort"
+	"strings"
 	"unsafe"
 
 	"reflect"
@@ -15,7 +17,7 @@ import (
 
 // TelemetryDictionary describes a list of packets each containing a list of points
 type TelemetryDictionary struct {
-	Packets          []*PacketInfo
+	Packets          PacketInfoSlice // []*PacketInfo
 	Units            []*string
 	FirstEnum        string
 	LastEnum         string
@@ -28,17 +30,17 @@ type TelemetryDictionary struct {
 
 // PacketInfo describes a single packet
 type PacketInfo struct {
-	APID          int32
+	APID          int
 	Documentation string
 	ID            string `json:"Id"`
 	IsTable       bool
 	Name          string
-	Points        []*PointInfo
+	Points        PointInfoSlice // []*PointInfo
 }
 
 // PointInfo describes a single telemetry point, providing the information needed to extract its value from a binary packet
 type PointInfo struct {
-	APID          int32
+	APID          int
 	Documentation string
 	FieldType     byte
 	ID            string `json:"Id"`
@@ -721,6 +723,14 @@ func LoadDictionary(filename string) (*TelemetryDictionary, error) {
 		return nil, fmt.Errorf("error deserializing dictionary in %s:%v", filename, err)
 	}
 
+	// uppercase all ids
+	for _, pkt := range dictionary.Packets {
+		pkt.ID = strings.ToUpper(pkt.ID)
+		for _, pt := range pkt.Points {
+			pt.ID = strings.ToUpper(pt.ID)
+		}
+	}
+
 	// Copy packet pointers to a lookup array for faster access
 	for i, info := range dictionary.Packets {
 		apid := info.APID
@@ -733,6 +743,19 @@ func LoadDictionary(filename string) (*TelemetryDictionary, error) {
 	}
 
 	propagateConverters(&dictionary)
+
+	// Sort
+	pktlist := dictionary.Packets
+	sort.Sort(pktlist)
+
+	//	sort.Slice(dictionary.Packets, func(i, j int) bool {
+	//		return dictionary.Packets[i].ID < dictionary.Packets[j].ID
+	//	})
+
+	for _, p := range dictionary.Packets {
+		ptlist := p.Points
+		sort.Sort(ptlist)
+	}
 
 	return &dictionary, nil
 }
@@ -769,4 +792,108 @@ func propagateConverters(dictionary *TelemetryDictionary) {
 			}
 		}
 	}
+}
+
+//
+// Accessors
+//
+
+// GetPacketByAPID looks a packet up by its apid.
+// It returns the packet and an ok? boolean
+func (d *TelemetryDictionary) GetPacketByAPID(apid int) (*PacketInfo, bool) {
+	if apid < 0 || 2047 < apid {
+		return nil, false
+	}
+	p := d.PacketLookup[apid]
+	if p == nil {
+		return nil, false
+	}
+	return p, true
+}
+
+// GetPacketByID looks a packet up by its id.
+// It returns the packet and an ok? boolean
+func (d *TelemetryDictionary) GetPacketByID(id string) (*PacketInfo, bool) {
+	id = strings.ToUpper(id)
+	for _, p := range d.Packets {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	return nil, false
+}
+
+// GetPointByID looks a packet up by its id.
+// It returns the packet and an ok? boolean
+func (d *TelemetryDictionary) GetPointByID(id string) (*PointInfo, bool) {
+	id = strings.ToUpper(id)
+	i := strings.Index(id, ".")
+	if i < 0 {
+		return nil, false
+	}
+
+	packetID := id[0:i]
+	if pi, ok := d.GetPacketByID(packetID); ok {
+		for _, pt := range pi.Points {
+			if pt.ID == id {
+				return pt, true
+			}
+		}
+	}
+	return nil, false
+}
+
+// GetPointType returns the type string for telemetry points for the openmct client
+func (d *TelemetryDictionary) GetPointType(p *PointInfo) string {
+	i := p.FieldType
+	if i == S1 {
+		return "string"
+	}
+	if i < 2 {
+		return "float"
+	}
+	if 6 <= i && i <= 8 {
+		return "utc"
+	}
+	if i == URL {
+		return "image"
+	}
+	if i >= 20 {
+		return "number"
+	}
+	return "integer"
+}
+
+///
+/// Sorting garbage (give me a break)
+///
+
+// PacketInfoSlice is needed because go is deficient in some ways
+type PacketInfoSlice []*PacketInfo
+
+func (slice PacketInfoSlice) Len() int {
+	return len(slice)
+}
+
+func (slice PacketInfoSlice) Less(i, j int) bool {
+	return slice[i].ID < slice[j].ID
+}
+
+func (slice PacketInfoSlice) Swap(i, j int) {
+	slice[i], slice[j] = slice[j], slice[i]
+}
+
+// PointInfoSlice is needed because go is deficient in some ways
+type PointInfoSlice []*PointInfo
+
+func (slice PointInfoSlice) Len() int {
+	return len(slice)
+}
+
+func (slice PointInfoSlice) Less(i, j int) bool {
+	return slice[i].ID < slice[j].ID
+}
+
+func (slice PointInfoSlice) Swap(i, j int) {
+	slice[i], slice[j] = slice[j], slice[i]
 }
