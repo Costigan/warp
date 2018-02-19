@@ -30,10 +30,10 @@ Cobra is a CLI library for Go that empowers applications.
 This application is a tool to generate the needed files
 to quickly create a Cobra application.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		server := server.WarpServer{SessionName: "demo",
-			Host: "",
-			Port: 8000,
-			StaticFiles: "../../../../../Projects/warp-test/dist/"}
+		server := server.Server{
+			Host:        "",
+			Port:        8000,
+			StaticFiles: "../../../../../projects/warp_data/dist/"}
 		server.Run()
 	},
 }

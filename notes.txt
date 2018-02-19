@@ -214,3 +214,14 @@ warp describe --source=session:
 warp import --remove --name session1
 warp import --touch --name session1
 warp session --name session1 --source=file:c:/RP/data/2015-08-25.short/ --bps=10000
+
+------------------------------------------------------------------------------
+
+Old code
+
+//	proxyURL := "ws://:41402"
+//	u, err := url.Parse(proxyURL)
+//	if err != nil {
+//		log.Fatal(fmt.Sprintf("Error parsing url(%v):%v", proxyURL, err))
+//	}
+//	router.PathPrefix("/realtime").Handler(websocketproxy.NewProxy(u))

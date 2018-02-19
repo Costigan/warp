@@ -33,6 +33,11 @@ var testCmd = &cobra.Command{
 	},
 }
 
+var test_ws_decom bool
+var test_ws_history bool
+var test_rest_history bool
+var test_dictionary bool
+
 func init() {
 	rootCmd.AddCommand(testCmd)
 
@@ -45,6 +50,11 @@ func init() {
 	// Cobra supports local flags which will only run when this command
 	// is called directly, e.g.:
 	// testCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+
+	testCmd.Flags().BoolVar(&test_ws_decom, "ws-decom", false, "Test websocket subscription and decom service")
+	testCmd.Flags().BoolVar(&test_ws_history, "ws-history", false, "Test websocket history service")
+	testCmd.Flags().BoolVar(&test_rest_history, "rest-history", false, "Test REST history service")
+	testCmd.Flags().BoolVar(&test_dictionary, "rest-dictionary", false, "Test REST dictionary service")
 }
 
 func test1(args []string) {
@@ -62,7 +72,7 @@ func test1(args []string) {
 }
 
 func test2(args []string) {
-	filename := "C:/git/github/warp-server-legacy/src/StaticFiles/rp.dictionary.json.gz"
+	filename := "/home/mshirley/rp.dictionary.json.gz"
 	dictionary, err := ccsds.LoadDictionary(filename)
 	if err != nil {
 		fmt.Println(err)
@@ -143,7 +153,7 @@ func generateCCSDSHeader(apid int, seq int, datalen int) *bytes.Buffer {
 }
 
 func test5(args []string) {
-	dictionaryFilename := "C:/git/github/warp-server-legacy/src/StaticFiles/rp.dictionary.json.gz"
+	dictionaryFilename := "/home/mshirley/rp.dictionary.json.gz"
 	dictionary, err := ccsds.LoadDictionary(dictionaryFilename)
 	if err != nil {
 		fmt.Println(err)
