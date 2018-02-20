@@ -77,8 +77,10 @@ func (server *Server) Run() {
 	}
 
 	// initialize internal state
+	server.clients = map[*websocket.Conn]*Client{}
 	server.packet_chan = make(chan ccsds.Packet)
 	server.subscription_chan = make(chan subscription_request)
+
 
 	// For now, build in the session name
 	server.Session = &Session{Name: "demo"}
@@ -249,7 +251,7 @@ func (client *Client) writePump() {
 //
 
 func (client *Client) handlePing(verb string, token string, msg map[string]interface{}) error {
-	sendJSON(pingResponse{response: "ping", token: token}, client)
+	sendJSON(PingResponse{Response: "ping", Token: token}, client)
 	return nil
 }
 
@@ -302,9 +304,14 @@ type errorResponse struct {
 	error    string
 }
 
-type pingResponse struct {
-	response string
-	token    string
+type PingRequest struct {
+	Request string `json:"request"`
+	Token   string `json:"token"`
+}
+
+type PingResponse struct {
+	Response string `json:"response"`
+	Token    string `json:"token"`
 }
 
 //
@@ -336,7 +343,7 @@ type client_msg struct {
 type Session struct {
 	Name           string
 	Dictionary     *ccsds.TelemetryDictionary
-	DictionaryRoot *dictionaryJSON
+	DictionaryRoot *DictionaryRootResponse
 }
 
 func (session *Session) loadDictionary() error {
@@ -512,24 +519,35 @@ func writePointJSON(w http.ResponseWriter, pt *ccsds.PointInfo, dict *ccsds.Tele
 // WebSocket Handlers
 //
 
-//
-//
-//
+var dictionaryRootJSON DictionaryRootResponse
 
-type dictionaryJSON struct {
-	Response string       `json:"response"`
-	Session  string       `json:"session"`
-	Packets  []packetJSON `json:"packets"`
+func makeDictionaryRoot(dictionary *ccsds.TelemetryDictionary) *DictionaryRootResponse {
+	packets := make([]PacketJSON, 0, len(dictionary.Packets))
+	for _, p := range dictionary.Packets {
+		p1 := PacketJSON{ID: p.ID, Name: p.Name, APID: p.APID, Description: p.Documentation}
+		packets = append(packets, p1)
+	}
+	return &DictionaryRootResponse{Response: "list_packets", Session: "demo", Packets: packets}
 }
 
-type packetJSON struct {
+//
+// Templates
+//
+
+type DictionaryRootResponse struct {
+	Response string       `json:"response"`
+	Session  string       `json:"session"`
+	Packets  []PacketJSON `json:"packets"`
+}
+
+type PacketJSON struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	APID        int    `json:"apid"`
 	Description string `json:"description"`
 }
 
-type pointJSON struct {
+type PointJSON struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	APID        int    `json:"apid"`
@@ -539,13 +557,23 @@ type pointJSON struct {
 	Conversion  string `json:"conversion"`
 }
 
-var dictionaryRootJSON dictionaryJSON
+type PacketDictionaryResponse struct {
+	Response string       `json:"response"`
+	Session  string       `json:"session"`
+	Packet   string       `json:"packet"`
+	Packets  []PointJSON2 `json:"points"`
+}
 
-func makeDictionaryRoot(dictionary *ccsds.TelemetryDictionary) *dictionaryJSON {
-	packets := make([]packetJSON, 0, len(dictionary.Packets))
-	for _, p := range dictionary.Packets {
-		p1 := packetJSON{ID: p.ID, Name: p.Name, APID: p.APID, Description: p.Documentation}
-		packets = append(packets, p1)
-	}
-	return &dictionaryJSON{Response: "list_packets", Session: "demo", Packets: packets}
+type PointJSON2 struct {
+	Name   string                `json:"name"`
+	Key    string                `json:"key"`
+	Values []PointValuesTemplate `json:"values"`
+}
+
+type PointValuesTemplate struct {
+	Key    string      `json:"key"`
+	Source string      `json:"source"`
+	Name   string      `json:"name"`
+	Format string      `json:"format"`
+	Hints  interface{} `json:"hints"`
 }
