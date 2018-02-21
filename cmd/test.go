@@ -320,13 +320,13 @@ func testWebsocketDecom(count int) {
 	for i := 0; i < count; i++ {
 		tester := websocketTester{target: u}
 		fmt.Printf("created tester %d\r\n", i)
-		go func() { tester.run(wg) }()
+		go func() { tester.run(&wg) }()
 	}
 	wg.Wait()
 	fmt.Printf("Exiting testWebsocketDecom\r\n")
 }
 
-func (tester *websocketTester) run(wg sync.WaitGroup) {
+func (tester *websocketTester) run(wg *sync.WaitGroup) {
 	fmt.Printf("connecting to %s\r\n", tester.target.String())
 
 	c, _, err := websocket.DefaultDialer.Dial(tester.target.String(), nil)

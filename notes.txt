@@ -1,11 +1,37 @@
-* Package names
+Golang Notes
 
-  ccsds
-  rpimages
 
+
+  warp server   Serves a single session
+       --session-dir=<dir>  location for history
+       --overwrite
+       --dictionary=<dictionary_filename>
+       --
+
+
+  warp csv
+       --dictionary=<dictionary_filename>
+       --csv=<output_directory>
+       --packets=<packet_files>
+       --frame=<frame_files>
+
+  warp filter	Transforms telemetry data from one format to another
+
+  
+
+
+
+
+
+------------------------------------------------------------------------------
 * Main project
 
-  warp
+
+
+
+  warp filter
+
+
 
 * Commands
 
