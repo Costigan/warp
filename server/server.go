@@ -123,6 +123,9 @@ func (server *Server) Run() {
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 16384,
+	CheckOrigin: func(r *http.Request) bool {
+		return true;
+	},
 }
 
 func (server *Server) serveWS(w http.ResponseWriter, req *http.Request) {
