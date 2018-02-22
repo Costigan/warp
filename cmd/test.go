@@ -42,15 +42,15 @@ var testCmd = &cobra.Command{
 	},
 }
 
-var test_ws_decom bool
-var test_ws_history bool
-var test_rest_history bool
-var test_rest_dictionary bool
+var doTestWebsocketDecom bool
+var doTestWebsocketHistory bool
+var doTestRestHistory bool
+var doTestRestDictionary bool
 
-var server_host string = "localhost"
-var server_port int = 8000
+var serverHost = "localhost"
+var serverPort = 8000
 
-var session_name = "demo"
+var sessionName = "demo"
 
 func init() {
 	rootCmd.AddCommand(testCmd)
@@ -67,13 +67,13 @@ func init() {
 
 	// Consider adding a help flag here to override the default.  The default takes the -h option, which I'd like to use for host
 
-	testCmd.Flags().BoolVar(&test_ws_decom, "ws-decom", false, "Test websocket subscription and decom service")
-	testCmd.Flags().BoolVar(&test_ws_history, "ws-history", false, "Test websocket history service")
-	testCmd.Flags().BoolVar(&test_rest_history, "rest-history", false, "Test REST history service")
-	testCmd.Flags().BoolVar(&test_rest_dictionary, "rest-dictionary", false, "Test REST dictionary service")
+	testCmd.Flags().BoolVar(&doTestWebsocketDecom, "ws-decom", false, "Test websocket subscription and decom service")
+	testCmd.Flags().BoolVar(&doTestWebsocketHistory, "ws-history", false, "Test websocket history service")
+	testCmd.Flags().BoolVar(&doTestRestHistory, "rest-history", false, "Test REST history service")
+	testCmd.Flags().BoolVar(&doTestRestDictionary, "rest-dictionary", false, "Test REST dictionary service")
 
-	testCmd.Flags().StringVar(&server_host, "host", "localhost", "Hostname where a warp server will be running")
-	testCmd.Flags().IntVar(&server_port, "port", 8000, "Port where a warp server will be running")
+	testCmd.Flags().StringVar(&serverHost, "host", "localhost", "Hostname where a warp server will be running")
+	testCmd.Flags().IntVar(&serverPort, "port", 8000, "Port where a warp server will be running")
 }
 
 func test1(args []string) {
@@ -186,7 +186,7 @@ func test5(args []string) {
 	pktfile.Iterate(func(p ccsds.Packet) {
 		apid := p.APID()
 		fmt.Printf("apid=%d len=%d\r\n", apid, p.Length())
-		packetInfo := (*dictionary).PacketLookup[apid]
+		packetInfo := (*dictionary).PacketAPIDLookup[apid]
 		if packetInfo == nil {
 			return
 		}
@@ -204,20 +204,20 @@ func test5(args []string) {
 var netClient = &http.Client{Timeout: time.Second * 10}
 
 func test6(cmd *cobra.Command, args []string) {
-	fmt.Printf("test_ws_decom=%v\r\n", test_ws_decom)
-	fmt.Printf("test_ws_history=%v\r\n", test_ws_history)
-	fmt.Printf("test_rest_history=%v\r\n", test_rest_history)
-	fmt.Printf("test_rest_dictionary=%v\r\n", test_rest_dictionary)
-	fmt.Printf("server_port=%v\r\n", server_port)
+	fmt.Printf("doTestWebsocketDecom=%v\r\n", doTestWebsocketDecom)
+	fmt.Printf("doTestWebsocketHistory=%v\r\n", doTestWebsocketHistory)
+	fmt.Printf("doTestRestHistory=%v\r\n", doTestRestHistory)
+	fmt.Printf("doTestRestDictionary=%v\r\n", doTestRestDictionary)
+	fmt.Printf("serverPort=%v\r\n", serverPort)
 
-	dictionary_prefix = "http://" + server_host + ":" + fmt.Sprintf("%d", server_port) + "/dictionary/" + session_name
+	dictionaryPrefix = "http://" + serverHost + ":" + fmt.Sprintf("%d", serverPort) + "/dictionary/" + sessionName
 
-	websocket_prefix = "ws://" + server_host + ":" + fmt.Sprintf("%d", server_port) + "/realtime/"
+	websocketPrefix = "ws://" + serverHost + ":" + fmt.Sprintf("%d", serverPort) + "/realtime/"
 
-	if test_rest_dictionary {
+	if doTestRestDictionary {
 		testRestDictionary()
 	}
-	if test_ws_decom {
+	if doTestWebsocketDecom {
 		testWebsocketDecom(1)
 	}
 }
@@ -226,18 +226,18 @@ func test6(cmd *cobra.Command, args []string) {
 // testing the dictionary
 //
 
-var dictionary_prefix string
-var websocket_prefix string
+var dictionaryPrefix string
+var websocketPrefix string
 
 func testRestDictionary() {
-	root_bytes, ok := FetchURL(dictionary_prefix, "/root")
+	rootBytes, ok := fetchURL(dictionaryPrefix, "/root")
 	if !ok {
 		fmt.Printf("error fetching the dictionary root.")
 		return
 	}
 
 	var dict server.DictionaryRootResponse
-	if err := json.Unmarshal(root_bytes, &dict); err != nil {
+	if err := json.Unmarshal(rootBytes, &dict); err != nil {
 		fmt.Printf("error unmarshalling response to dictionary root: %v", err)
 		return
 	}
@@ -250,7 +250,7 @@ func testRestDictionary() {
 	//}
 
 	// fetch each packet by id
-	var response_map = map[string][]byte{}
+	var responseMap = map[string][]byte{}
 	lock := sync.RWMutex{}
 	var wg sync.WaitGroup
 	wg.Add(len(dict.Packets))
@@ -258,30 +258,30 @@ func testRestDictionary() {
 		pkt := pkt
 		go func() {
 			defer wg.Done()
-			pkt_bytes, ok2 := FetchURL(dictionary_prefix, "/id/"+pkt.ID)
+			pktBytes, ok2 := fetchURL(dictionaryPrefix, "/id/"+pkt.ID)
 			if !ok2 {
 				fmt.Printf("error fetching dictionary packet: %v", pkt.ID)
 				return
 			}
 			lock.Lock()
 			defer lock.Unlock()
-			response_map[pkt.ID] = pkt_bytes
+			responseMap[pkt.ID] = pktBytes
 		}()
 	}
 	wg.Wait()
 
 	// decomm all responses
-	var pkt_struct server.PacketDictionaryResponse
-	for pkt_id, pkt_bytes := range response_map {
-		if err := json.Unmarshal(pkt_bytes, &pkt_struct); err != nil {
-			fmt.Printf("error unmarshalling dictionary %s packet response: %v", pkt_id, err)
+	var pktStruct server.PacketDictionaryResponse
+	for pktID, pktBytes := range responseMap {
+		if err := json.Unmarshal(pktBytes, &pktStruct); err != nil {
+			fmt.Printf("error unmarshalling dictionary %s packet response: %v", pktID, err)
 		} else {
-			fmt.Printf("correct unmarshalling of %s\r\n", pkt_id)
+			fmt.Printf("correct unmarshalling of %s\r\n", pktID)
 		}
 	}
 }
 
-func FetchURL(prefix string, path string) ([]byte, bool) {
+func fetchURL(prefix string, path string) ([]byte, bool) {
 	r, err := netClient.Get(prefix + path)
 	if err != nil {
 		fmt.Printf("error fetching %s: %v", path, err)
@@ -313,8 +313,8 @@ type websocketTester struct {
 }
 
 func testWebsocketDecom(count int) {
-	fmt.Printf("in testWebsocketDecom\r\n")
-	u := url.URL{Scheme: "ws", Host: fmt.Sprintf("%s:%d", "localhost", server_port), Path: "/realtime"}
+	fmt.Printf("in doTestWebsocketDecom\r\n")
+	u := url.URL{Scheme: "ws", Host: fmt.Sprintf("%s:%d", "localhost", serverPort), Path: "/realtime"}
 	var wg sync.WaitGroup
 	wg.Add(count)
 	for i := 0; i < count; i++ {
@@ -323,7 +323,7 @@ func testWebsocketDecom(count int) {
 		go func() { tester.run(&wg) }()
 	}
 	wg.Wait()
-	fmt.Printf("Exiting testWebsocketDecom\r\n")
+	fmt.Printf("Exiting doTestWebsocketDecom\r\n")
 }
 
 func (tester *websocketTester) run(wg *sync.WaitGroup) {
@@ -357,10 +357,9 @@ func (tester *websocketTester) run(wg *sync.WaitGroup) {
 func (tester *websocketTester) sendJSON(msg interface{}) bool {
 	if bytes, err := json.Marshal(msg); err == nil {
 		return tester.send(bytes)
-	} else {
-		log.Printf("Error preparing json for a message: %s", msg)
-		return false
 	}
+	log.Printf("Error preparing json for a message: %s", msg)
+	return false
 }
 
 func (tester *websocketTester) send(msg []byte) bool {

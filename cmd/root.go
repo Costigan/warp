@@ -47,6 +47,7 @@ func Execute() {
 	}
 }
 
+// Verbose is used by commands to control printing explanatory messages
 var Verbose bool
 
 func init() {

@@ -25,7 +25,8 @@ type TelemetryDictionary struct {
 	MapConversions   []*DiscreteConversionMap
 	RangeConversions []*DiscreteConversionRangeList
 	PolyConversions  []*PolynomialConversion
-	PacketLookup     [2048]*PacketInfo
+	PacketAPIDLookup [2048]*PacketInfo
+	PacketIDLookup   map[string]*PacketInfo // ids are lowercase'd
 }
 
 // PacketInfo describes a single packet
@@ -35,7 +36,8 @@ type PacketInfo struct {
 	ID            string `json:"Id"`
 	IsTable       bool
 	Name          string
-	Points        PointInfoSlice // []*PointInfo
+	Points        PointInfoSlice        // []*PointInfo
+	PointMap      map[string]*PointInfo // ids are lowercase'd
 }
 
 // PointInfo describes a single telemetry point, providing the information needed to extract its value from a binary packet
@@ -723,22 +725,31 @@ func LoadDictionary(filename string) (*TelemetryDictionary, error) {
 		return nil, fmt.Errorf("error deserializing dictionary in %s:%v", filename, err)
 	}
 
-	// uppercase all ids
-	for _, pkt := range dictionary.Packets {
-		pkt.ID = strings.ToUpper(pkt.ID)
-		for _, pt := range pkt.Points {
-			pt.ID = strings.ToUpper(pt.ID)
+	// Make sure all points have the correct apid
+	for _, pi := range dictionary.Packets {
+		for _, pt := range pi.Points {
+			pt.APID = pi.APID
 		}
 	}
 
+	// index packets by apid
 	// Copy packet pointers to a lookup array for faster access
 	for i, info := range dictionary.Packets {
+		id := strings.ToLower(info.ID)
 		apid := info.APID
-		// This silently ignores tables and malformed apids.  Maybe this should say something
-		if apid >= 0 && apid < 2048 {
-			if dictionary.PacketLookup[apid] == nil {
-				dictionary.PacketLookup[apid] = dictionary.Packets[i]
-			}
+		// Ignore tables and out-of-range apids.  It also just takes the first apid for each array slot
+		if !strings.Contains(id, "table") && !strings.Contains(id, "tbl") && apid >= 0 && apid < 2048 && dictionary.PacketAPIDLookup[apid] == nil {
+			dictionary.PacketAPIDLookup[apid] = dictionary.Packets[i]
+		}
+	}
+
+	// index packets by id (include tables)
+	dictionary.PacketIDLookup = make(map[string]*PacketInfo)
+	for _, pkt := range dictionary.Packets {
+		dictionary.PacketIDLookup[strings.ToLower(pkt.ID)] = pkt
+		pkt.PointMap = make(map[string]*PointInfo)
+		for _, pt := range pkt.Points {
+			pkt.PointMap[strings.ToLower(pt.ID)] = pt
 		}
 	}
 
@@ -804,7 +815,7 @@ func (d *TelemetryDictionary) GetPacketByAPID(apid int) (*PacketInfo, bool) {
 	if apid < 0 || 2047 < apid {
 		return nil, false
 	}
-	p := d.PacketLookup[apid]
+	p := d.PacketAPIDLookup[apid]
 	if p == nil {
 		return nil, false
 	}
@@ -814,11 +825,9 @@ func (d *TelemetryDictionary) GetPacketByAPID(apid int) (*PacketInfo, bool) {
 // GetPacketByID looks a packet up by its id.
 // It returns the packet and an ok? boolean
 func (d *TelemetryDictionary) GetPacketByID(id string) (*PacketInfo, bool) {
-	id = strings.ToUpper(id)
-	for _, p := range d.Packets {
-		if p.ID == id {
-			return p, true
-		}
+	pkt, ok := d.PacketIDLookup[strings.ToLower(id)]
+	if ok {
+		return pkt, ok
 	}
 	return nil, false
 }
@@ -826,19 +835,28 @@ func (d *TelemetryDictionary) GetPacketByID(id string) (*PacketInfo, bool) {
 // GetPointByID looks a packet up by its id.
 // It returns the packet and an ok? boolean
 func (d *TelemetryDictionary) GetPointByID(id string) (*PointInfo, bool) {
-	id = strings.ToUpper(id)
+	id = strings.ToLower(id)
 	i := strings.Index(id, ".")
 	if i < 0 {
 		return nil, false
 	}
-
+	if i >= len(id)-1 {
+		return nil, false
+	}
 	packetID := id[0:i]
-	if pi, ok := d.GetPacketByID(packetID); ok {
-		for _, pt := range pi.Points {
-			if pt.ID == id {
-				return pt, true
-			}
+	if pkt, ok := d.GetPacketByID(packetID); ok {
+		if pt, ok := pkt.GetPointByID(id); ok {
+			return pt, ok
 		}
+	}
+	return nil, false
+}
+
+// GetPointByID returns the telemetry point within a packet
+func (pkt *PacketInfo) GetPointByID(id string) (*PointInfo, bool) {
+	pt, ok := pkt.PointMap[strings.ToLower(id)]
+	if ok {
+		return pt, ok
 	}
 	return nil, false
 }
@@ -883,7 +901,7 @@ func (slice PacketInfoSlice) Swap(i, j int) {
 	slice[i], slice[j] = slice[j], slice[i]
 }
 
-// PointInfoSlice is needed because go is deficient in some ways
+// PointInfoSlice is needed because go is deficient in some ways (this supports sorting)
 type PointInfoSlice []*PointInfo
 
 func (slice PointInfoSlice) Len() int {

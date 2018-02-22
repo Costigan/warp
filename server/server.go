@@ -16,25 +16,26 @@ package server
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	//	"net/url"
+	"sort"
 	"strings"
 
 	"github.com/Costigan/warp/ccsds"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
-	//	"github.com/koding/websocketproxy"
 )
 
 //
 // Server
 //
 
-// WarpServer handles realtime and history connections to multiple clients
+// Server handles realtime and history connections to multiple clients
 type Server struct {
 	// Configuration
 	Host string
@@ -50,11 +51,12 @@ type Server struct {
 	Session *Session
 
 	// Internal state
-	clients map[*websocket.Conn]*Client
+	clients             map[*websocket.Conn]*Client
+	packetDispatchTable *([][]*ccsds.PointInfo)
 
 	// Channels
-	packet_chan       chan ccsds.Packet         // incomming packets
-	subscription_chan chan subscription_request // request to goroutine that manages subscriptions
+	packetChan       chan ccsds.Packet           // incoming packets
+	subscriptionChan chan *subscriptionUpdateMsg // request to goroutine that manages subscriptions
 }
 
 // Run runs a web server
@@ -67,7 +69,7 @@ func (server *Server) Run() {
 		server.DictionaryPrefix = "/dictionary"
 	}
 	if server.WebsocketPrefix == "" {
-		server.WebsocketPrefix = "/realtime"
+		server.WebsocketPrefix = "/realtime/"
 	}
 	if server.HistoryPrefix == "" {
 		server.HistoryPrefix = "/history"
@@ -78,9 +80,9 @@ func (server *Server) Run() {
 
 	// initialize internal state
 	server.clients = map[*websocket.Conn]*Client{}
-	server.packet_chan = make(chan ccsds.Packet)
-	server.subscription_chan = make(chan subscription_request)
-
+	server.packetChan = make(chan ccsds.Packet)
+	server.subscriptionChan = make(chan *subscriptionUpdateMsg)
+	server.packetDispatchTable = makeEmptyPacketDispatchTable()
 
 	// For now, build in the session name
 	server.Session = &Session{Name: "demo"}
@@ -98,13 +100,10 @@ func (server *Server) Run() {
 	dictionarySubrouter.HandleFunc("/{session}/root", func(w http.ResponseWriter, r *http.Request) { handleDictionaryRoot(server, w, r) }).Methods("GET")
 	dictionarySubrouter.HandleFunc("/{session}", func(w http.ResponseWriter, r *http.Request) { handleWholeDictionary(server, w, r) }).Methods("GET")
 
-	//dictionarySubrouter.HandleFunc("/{session}/id/{id}", handleHTTP).Methods("GET")
-	//dictionarySubrouter.HandleFunc("/{session}/root", handleHTTP).Methods("GET")
-	//dictionarySubrouter.HandleFunc("/{session}", handleHTTP).Methods("GET")
-
 	//	router.HandleFunc("/history", handleHTTP).Methods("GET")
 
-	router.HandleFunc(server.PersistancePrefix, handleCouch2)
+	router.HandleFunc("/couch", handleCouch)
+	router.HandleFunc("/couch/{rest:.*}", handleCouch)
 
 	// WebSocket
 	router.HandleFunc(server.WebsocketPrefix, func(w http.ResponseWriter, req *http.Request) {
@@ -113,6 +112,8 @@ func (server *Server) Run() {
 
 	// Files
 	router.PathPrefix("/").Handler(http.StripPrefix("/", http.FileServer(http.Dir(server.StaticFiles))))
+
+	go server.handleSubscriptions()
 
 	listenString := fmt.Sprintf("%s:%d", server.Host, server.Port)
 	fmt.Printf("listenString=%s\r\n", listenString)
@@ -124,7 +125,7 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 16384,
 	CheckOrigin: func(r *http.Request) bool {
-		return true;
+		return true
 	},
 }
 
@@ -141,9 +142,115 @@ func (server *Server) serveWS(w http.ResponseWriter, req *http.Request) {
 	go client.readPump()
 }
 
-func (server *Server) remove_client(client *Client) {
+func (server *Server) removeClient(client *Client) {
 	//TODO: This should do something with the channels
 	delete(server.clients, client.conn)
+}
+
+func (server *Server) handleSubscriptions() {
+	d := server.Session.Dictionary
+	for {
+		msg, ok := <-server.subscriptionChan
+		if !ok {
+			break
+		}
+		switch msg.verb {
+		case addSubscription:
+			badIDs := modifyClientSubscription(d, msg)
+			// Build the response to the client
+			root := make(map[string]interface{})
+			root["response"] = "subscribe"
+			root["token"] = msg.token
+			if len(badIDs) > 0 {
+				root["status"] = "error"
+				root["bad_ids"] = badIDs
+			} else {
+				root["status"] = "success"
+			}
+			sendJSON(root, msg.client)
+			server.updateDispatch() // Rebuild the subscription dispatch table
+		case deleteSubscription:
+			badIDs := modifyClientSubscription(d, msg)
+			// Build the response to the client
+			root := make(map[string]interface{})
+			root["response"] = "unsubscribe"
+			root["token"] = msg.token
+			if len(badIDs) > 0 {
+				root["status"] = "error"
+				root["bad_ids"] = badIDs
+			} else {
+				root["status"] = "success"
+			}
+			sendJSON(root, msg.client)
+			server.updateDispatch() // Rebuild the subscription dispatch table
+		}
+	}
+}
+
+func modifyClientSubscription(d *ccsds.TelemetryDictionary, msg *subscriptionUpdateMsg) []string {
+	subscriptions := msg.client.subscriptions
+	badIDs := make([]string, 0, 8)
+	for _, id := range msg.ids {
+		if strings.Contains(id, ".") {
+			if pt, ok := d.GetPointByID(id); ok {
+				subscriptions[pt] = true
+			} else {
+				badIDs = append(badIDs, id)
+			}
+		} else {
+			if pi, ok := d.GetPacketByID(id); ok {
+				for _, pt := range pi.Points {
+					subscriptions[pt] = true
+				}
+			} else {
+				badIDs = append(badIDs, id)
+			}
+		}
+	}
+	return badIDs
+}
+
+//
+// Packet Decom
+//
+
+func (server *Server) updateDispatch() {
+	// Collect all PointInfos from all client subscription tables.  Eliminate duplicates
+	m := make(map[*ccsds.PointInfo]bool)
+	for _, client := range server.clients {
+		for pointInfo := range client.subscriptions {
+			m[pointInfo] = true
+		}
+	}
+
+	// Convert the unique PointInfos to a list, then sort
+	points := make(byID, 0, 128)
+	for pointInfo := range m {
+		points = append(points, pointInfo)
+	}
+	sort.Sort(byID(points))
+
+	table := makeEmptyPacketDispatchTable()
+	for _, pointInfo := range points {
+		(*table)[pointInfo.APID] = append((*table)[pointInfo.APID], pointInfo)
+	}
+
+	// Now, update the dispatch table.  This is a single assignment and is atomic
+	server.packetDispatchTable = table
+}
+
+type byID []*ccsds.PointInfo
+
+func (l byID) Len() int           { return len(l) }
+func (l byID) Swap(i, j int)      { l[i], l[j] = l[j], l[i] }
+func (l byID) Less(i, j int) bool { return (*l[i]).ID < (l[j]).ID }
+
+func makeEmptyPacketDispatchTable() *([][]*ccsds.PointInfo) {
+	table := make([][]*ccsds.PointInfo, 2048, 2048)
+	for i := 0; i < 2048; i++ {
+		table[i] = make([]*ccsds.PointInfo, 0, 8)
+	}
+	return &table
 }
 
 ////////////////////////////////////////////////////////////////////////
@@ -154,16 +261,17 @@ func (server *Server) remove_client(client *Client) {
 type Client struct {
 	server        *Server
 	conn          *websocket.Conn
-	msg_chan      chan client_msg
-	subscriptions map[*ccsds.PacketInfo][]*ccsds.PointInfo
+	msgChan       chan clientMsg
+	subscriptions map[*ccsds.PointInfo]bool
 }
 
 func newClient(server *Server, conn *websocket.Conn) *Client {
 	return &Client{
 		server:        server,
 		conn:          conn,
-		msg_chan:      make(chan client_msg),
-		subscriptions: make(map[*ccsds.PacketInfo][]*ccsds.PointInfo)}
+		msgChan:       make(chan clientMsg),
+		subscriptions: make(map[*ccsds.PointInfo]bool),
+	}
 }
 
 //
@@ -191,40 +299,49 @@ func (client *Client) readPump() {
 			continue
 		}
 
-		msg_object, ok1 := msg.(map[string]interface{})
-		if !ok1 {
+		msgObject, ok := msg.(map[string]interface{})
+		if !ok {
 			log.Printf("websocket(%s) received a json message that was not an object: %s", client.conn.RemoteAddr().String(), string(p))
 			continue
 		}
 
-		msg_verb, ok2 := msg_object["request"].(string)
-		if !ok2 {
+		msgVerb, ok := msgObject["request"].(string)
+		if !ok {
 			log.Printf("websocket(%s) received a json message object with no request verb: %s", client.conn.RemoteAddr().String(), string(p))
 			continue
 		}
+		msgToken := msgObject["token"]
 
-		msg_token, ok3 := msg_object["token"].(string)
-		if !ok3 {
-			log.Printf("websocket(%s) received a json message object with no token: %s", client.conn.RemoteAddr().String(), string(p))
-			continue
-		}
-
-		var handler_err error
-		switch msg_verb {
+		var err1, err2 error
+		switch msgVerb {
 		case "ping":
-			handler_err = client.handlePing(msg_verb, msg_token, msg_object)
+			var msg PingRequest
+			err1 = json.Unmarshal(p, &msg)
+			if err1 == nil {
+				err2 = client.handlePing(&msg)
+			}
 		case "subscribe":
-			handler_err = client.handleSubscribe(msg_verb, msg_token, msg_object)
+			var msg SubscribeRequest
+			err1 = json.Unmarshal(p, &msg)
+			if err1 == nil {
+				err2 = client.handleSubscribe(&msg)
+			}
 		case "unsubscribe":
-			handler_err = client.handleUnsubscribe(msg_verb, msg_token, msg_object)
+			var msg UnsubscribeRequest
+			err1 = json.Unmarshal(p, &msg)
+			if err1 == nil {
+				err2 = client.handleUnsubscribe(&msg)
+			}
 		default:
-			log.Printf("websocket(%s) received a request(%s) with no handler: %s", client.conn.RemoteAddr().String(), msg_verb, string(p))
+			err1 = fmt.Errorf("websocket(%s) received a request(%s) with no handler: %s", client.conn.RemoteAddr().String(), msgVerb, string(p))
 		}
 
-		if handler_err != nil {
-			log.Printf("websocket(%s) error processing verb(%s): %s", client.conn.RemoteAddr().String(), msg_verb, err)
-			sendJSON(errorResponse{response: msg_verb, token: msg_token, error: err.Error()}, client)
-			continue
+		if err1 != nil {
+			log.Printf("websocket(%s) error parsing %s request: %v", client.conn.RemoteAddr().String(), msgVerb, err1)
+			sendJSON(ErrorResponse{Response: msgVerb, Token: msgToken, Error: err.Error()}, client)
+		} else if err2 != nil {
+			log.Printf("websocket(%s) error processing %s request: %v", client.conn.RemoteAddr().String(), msgVerb, err2)
+			sendJSON(ErrorResponse{Response: msgVerb, Token: msgToken, Error: err.Error()}, client)
 		}
 	}
 }
@@ -235,15 +352,15 @@ func (client *Client) readPump() {
 
 func (client *Client) writePump() {
 	for {
-		msg := <-client.msg_chan
+		msg := <-client.msgChan
 		err := client.conn.WriteMessage(websocket.TextMessage, msg.bytes)
 		if err != nil {
-			log.Printf("websocket(%s) error on write:", client.conn.RemoteAddr().String(), err)
-			client.server.remove_client(client)
+			log.Printf("websocket(%s) error on write: %v", client.conn.RemoteAddr().String(), err)
+			client.server.removeClient(client)
 			return
 		}
 		if len(msg.clients) > 0 {
-			msg.clients[0].msg_chan <- client_msg{clients: msg.clients[1:], bytes: msg.bytes}
+			msg.clients[0].msgChan <- clientMsg{clients: msg.clients[1:], bytes: msg.bytes}
 		}
 		// Drop the bytes on the floor here.  Later, send back to the server
 	}
@@ -253,25 +370,19 @@ func (client *Client) writePump() {
 // Message Handlers
 //
 
-func (client *Client) handlePing(verb string, token string, msg map[string]interface{}) error {
-	sendJSON(PingResponse{Response: "ping", Token: token}, client)
+func (client *Client) handlePing(r *PingRequest) error {
+	sendJSON(PingResponse{Response: "ping", Token: r.Token}, client)
 	return nil
 }
 
-func (client *Client) handleSubscribe(verb string, token string, msg map[string]interface{}) error {
-	if ids, ok := msg["ids"].([]string); ok {
-		client.server.subscription_chan <- subscription_request{verb: addSubscription, ids: ids, client: client}
-		return nil
-	}
-	return errors.New("couldn't find ids property")
+func (client *Client) handleSubscribe(r *SubscribeRequest) error {
+	client.server.subscriptionChan <- &subscriptionUpdateMsg{verb: addSubscription, ids: r.IDs, client: client, token: r.Token}
+	return nil
 }
 
-func (client *Client) handleUnsubscribe(verb string, token string, msg map[string]interface{}) error {
-	if ids, ok := msg["ids"].([]string); ok {
-		client.server.subscription_chan <- subscription_request{verb: deleteSubscription, ids: ids, client: client}
-		return nil
-	}
-	return errors.New("couldn't find ids property")
+func (client *Client) handleUnsubscribe(r *UnsubscribeRequest) error {
+	client.server.subscriptionChan <- &subscriptionUpdateMsg{verb: deleteSubscription, ids: r.IDs, client: client, token: r.Token}
+	return nil
 }
 
 //
@@ -281,7 +392,7 @@ func (client *Client) handleUnsubscribe(verb string, token string, msg map[strin
 // send a message to one or more clients
 func send(msg []byte, clients ...*Client) {
 	if len(clients) > 0 {
-		clients[0].msg_chan <- client_msg{bytes: msg, clients: clients[1:]}
+		clients[0].msgChan <- clientMsg{bytes: msg, clients: clients[1:]}
 	}
 }
 
@@ -298,32 +409,66 @@ func sendJSON(msg interface{}, clients ...*Client) {
 }
 
 //
-// External Message Templates
+// Public Message Templates
 //
 
-type errorResponse struct {
-	response string
-	token    string
-	error    string
-}
-
+// PingRequest is a message template.  Also used as a minimal request
 type PingRequest struct {
-	Request string `json:"request"`
-	Token   string `json:"token"`
+	Request string      `json:"request"`
+	Token   interface{} `json:"token"`
 }
 
+// PingResponse is a message template
 type PingResponse struct {
-	Response string `json:"response"`
-	Token    string `json:"token"`
+	Response string      `json:"response"`
+	Token    interface{} `json:"token"`
+}
+
+// SubscribeRequest is a message template
+type SubscribeRequest struct {
+	Request string      `json:"request"`
+	Token   interface{} `json:"token"`
+	IDs     []string    `json:"ids"`
+}
+
+// SubscribeResponse is a message template
+type SubscribeResponse struct {
+	Response string      `json:"response"`
+	Token    interface{} `json:"token"`
+	Status   string      `json:"status"`
+	BadIDs   []string    `json:"bad_ids"`
+}
+
+// UnsubscribeRequest is a message template
+type UnsubscribeRequest struct {
+	Request string      `json:"request"`
+	Token   interface{} `json:"token"`
+	IDs     []string    `json:"ids"`
+}
+
+// UnsubscribeResponse is a message template
+type UnsubscribeResponse struct {
+	Response string      `json:"response"`
+	Token    interface{} `json:"token"`
+	Status   string      `json:"status"`
+	BadIDs   []string    `json:"bad_ids"`
+}
+
+// ErrorResponse is a generic message template
+type ErrorResponse struct {
+	Response string      `json:"response"`
+	Token    interface{} `json:"token"`
+	Error    string      `json:"error"`
 }
 
 //
 // Internal Message Templates
 //
 
-type subscription_request struct {
+type subscriptionUpdateMsg struct {
 	client *Client
 	verb   int
+	token  interface{}
 	ids    []string
 }
 
@@ -332,8 +477,8 @@ const (
 	deleteSubscription = int(iota)
 )
 
-// client_msg contains a single message for one or more clients.
-type client_msg struct {
+// clientMsg contains a single message for one or more clients.
+type clientMsg struct {
 	clients []*Client
 	bytes   []byte
 }
@@ -384,14 +529,10 @@ func handleHTTP(w http.ResponseWriter, req *http.Request) {
 	io.Copy(w, resp.Body)
 }
 
-func handleCouch2(w http.ResponseWriter, req *http.Request) {
-	fmt.Println("***here***")
-}
-
 func handleCouch(w http.ResponseWriter, req *http.Request) {
-	fmt.Printf("handleCouch %s\r\n", req.URL)
-	remoteURL := "http://localhost:5984" + req.URL.Path
-	fmt.Printf("remoteURL=%s\r\n", remoteURL)
+	splits := strings.Split(req.URL.Path, string(os.PathSeparator))
+	remoteURL := "http://localhost:5984/" + filepath.Join(splits[2:]...)
+	fmt.Printf("couch: req=%v remote=%v\n", req.URL, remoteURL)
 	resp, err := http.DefaultClient.Get(remoteURL)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
@@ -537,12 +678,14 @@ func makeDictionaryRoot(dictionary *ccsds.TelemetryDictionary) *DictionaryRootRe
 // Templates
 //
 
+// DictionaryRootResponse is a message template
 type DictionaryRootResponse struct {
 	Response string       `json:"response"`
 	Session  string       `json:"session"`
 	Packets  []PacketJSON `json:"packets"`
 }
 
+// PacketJSON is part of a message template
 type PacketJSON struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -550,6 +693,7 @@ type PacketJSON struct {
 	Description string `json:"description"`
 }
 
+// PointJSON is part of a message template
 type PointJSON struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -560,6 +704,7 @@ type PointJSON struct {
 	Conversion  string `json:"conversion"`
 }
 
+// PacketDictionaryResponse is part of a message template
 type PacketDictionaryResponse struct {
 	Response string       `json:"response"`
 	Session  string       `json:"session"`
@@ -567,12 +712,14 @@ type PacketDictionaryResponse struct {
 	Packets  []PointJSON2 `json:"points"`
 }
 
+// PointJSON2 is part of a message template
 type PointJSON2 struct {
 	Name   string                `json:"name"`
 	Key    string                `json:"key"`
 	Values []PointValuesTemplate `json:"values"`
 }
 
+// PointValuesTemplate is part of a message template
 type PointValuesTemplate struct {
 	Key    string      `json:"key"`
 	Source string      `json:"source"`

@@ -47,10 +47,10 @@ to quickly create a Cobra application.`,
 	},
 }
 
-var dictionary_filename string
-var csv_path string
-var packets_bool bool
-var frames_bool bool
+var dictionaryFilename string
+var csvPath string
+var packetsBool bool
+var framesBool bool
 var recursive bool
 var filepat string
 
@@ -67,57 +67,57 @@ func init() {
 	// is called directly, e.g.:
 	// csvCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 
-	csvCmd.Flags().StringVarP(&dictionary_filename, "dictionary", "d", "./dictionary.json.gz", "Path of dictionary file")
+	csvCmd.Flags().StringVarP(&dictionaryFilename, "dictionary", "d", "./dictionary.json.gz", "Path of dictionary file")
 	csvCmd.MarkFlagRequired("dictionary")
-	csvCmd.Flags().StringVarP(&csv_path, "outdir", "", "./csv", "Path of dictionary file")
+	csvCmd.Flags().StringVarP(&csvPath, "outdir", "", "./csv", "Path of dictionary file")
 	csvCmd.MarkFlagRequired("outdir")
-	csvCmd.Flags().BoolVarP(&packets_bool, "packets", "p", true, "use if the files contain ccsds packets")
-	csvCmd.Flags().BoolVarP(&frames_bool, "frames", "f", false, "use if the files contain ccsds frames")
+	csvCmd.Flags().BoolVarP(&packetsBool, "packets", "p", true, "use if the files contain ccsds packets")
+	csvCmd.Flags().BoolVarP(&framesBool, "frames", "f", false, "use if the files contain ccsds frames")
 	csvCmd.Flags().BoolVarP(&recursive, "recursive", "r", false, "search inside directories for packet or frame files")
 	csvCmd.Flags().StringVar(&filepat, "pattern", "", "search for files matching a regular expression")
 }
 
 func generateCsvFiles(cmd *cobra.Command, args []string) {
 	if Verbose {
-		fmt.Printf("dictionary=%v\n", dictionary_filename)
-		fmt.Printf("outdir    =%v\n", csv_path)
+		fmt.Printf("dictionary=%v\n", dictionaryFilename)
+		fmt.Printf("outdir    =%v\n", csvPath)
 		fmt.Printf("recursive =%v\n", recursive)
 		fmt.Printf("pattern   =%v\n", filepat)
-		fmt.Printf("packets   =%v\n", packets_bool)
-		fmt.Printf("frames    =%v\n", frames_bool)
+		fmt.Printf("packets   =%v\n", packetsBool)
+		fmt.Printf("frames    =%v\n", framesBool)
 		for i := 0; i < len(args); i++ {
 			fmt.Printf(" arg[%d]=%s\n", i, args[i])
 		}
 	}
 
 	// Check that the outdir exists or create it
-	err := os.MkdirAll(csv_path, os.ModeDir | 0770)
+	err := os.MkdirAll(csvPath, os.ModeDir|0770)
 	if err != nil {
-		fmt.Printf("An error occurred while creating the output directory(%s): %v\n", csv_path, err);
+		fmt.Printf("An error occurred while creating the output directory(%s): %v\n", csvPath, err)
 		fmt.Println("Aborting...")
 		return
 	}
 
 	// Load the dictionary
-	dictionary, err := ccsds.LoadDictionary(dictionary_filename)
+	dictionary, err := ccsds.LoadDictionary(dictionaryFilename)
 	if err != nil {
-		fmt.Printf("An error occurred reading the dictionary %s: %v\n", dictionary_filename, err)
+		fmt.Printf("An error occurred reading the dictionary %s: %v\n", dictionaryFilename, err)
 		return
 	}
 
-	writerMap := WriterMap{theMap: map[int]*csvWriter{}, maxOpen: 20}
+	writerMap := writerMap{theMap: map[int]*csvWriter{}, maxOpen: 20}
 	apidErrors := make(map[int]bool)
 
 	channel := make(chan ccsds.Packet, 20)
 	go generatePackets(channel, args)
 
 	// This part of the program receives packets from generatePackets()
-	var packet_count int = 0
+	var packetCount int
 	for pkt := range channel {
-		packet_count++
+		packetCount++
 		apid := pkt.APID()
 
-		packetInfo := (*dictionary).PacketLookup[apid]
+		packetInfo := (*dictionary).PacketAPIDLookup[apid]
 		if packetInfo == nil {
 			_, ok := apidErrors[apid]
 			if ok {
@@ -130,7 +130,7 @@ func generateCsvFiles(cmd *cobra.Command, args []string) {
 
 		writer, ok := writerMap.get(apid)
 		if !ok {
-			filename := filepath.Join(csv_path, packetInfo.Name+".csv")
+			filename := filepath.Join(csvPath, packetInfo.Name+".csv")
 			writer = &csvWriter{theMap: &writerMap, apid: apid, filename: filename, buffer: bytes.NewBuffer(make([]byte, 0, 2048))}
 			writerMap.put(apid, writer)
 
@@ -176,28 +176,28 @@ func generateCsvFiles(cmd *cobra.Command, args []string) {
 
 	writerMap.closeAll()
 
-	fmt.Printf("%d packets were processed.\n", packet_count)
+	fmt.Printf("%d packets were processed.\n", packetCount)
 }
 
 //
 // Writer Map
 //
 
-type WriterMap struct {
+type writerMap struct {
 	theMap  map[int]*csvWriter
 	maxOpen int
 }
 
-func (m *WriterMap) get(apid int) (*csvWriter, bool) {
+func (m *writerMap) get(apid int) (*csvWriter, bool) {
 	v, ok := m.theMap[apid]
 	return v, ok
 }
 
-func (m *WriterMap) put(apid int, w *csvWriter) {
+func (m *writerMap) put(apid int, w *csvWriter) {
 	m.theMap[apid] = w
 }
 
-func (m *WriterMap) getLeastRecentlyUsed() *csvWriter {
+func (m *writerMap) getLeastRecentlyUsed() *csvWriter {
 	openCount := 0
 	for _, writer := range m.theMap {
 		if writer.file != nil {
@@ -220,7 +220,7 @@ func (m *WriterMap) getLeastRecentlyUsed() *csvWriter {
 	return oldest
 }
 
-func (m *WriterMap) closeAll() {
+func (m *writerMap) closeAll() {
 	for _, writer := range m.theMap {
 		writer.close()
 	}
@@ -237,7 +237,7 @@ type csvWriter struct {
 	buffer    *bytes.Buffer
 	age       int
 	threshold int
-	theMap    *WriterMap
+	theMap    *writerMap
 }
 
 func (writer *csvWriter) open() error {
@@ -292,8 +292,8 @@ func (writer *csvWriter) close() {
 //
 
 func generatePackets(c chan ccsds.Packet, args []string) {
-	for _, base_pattern := range args {
-		pat := base_pattern
+	for _, basePattern := range args {
+		pat := basePattern
 		if !filepath.IsAbs(pat) {
 			pat = filepath.Join(".", pat)
 		}
