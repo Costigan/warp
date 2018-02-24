@@ -22,8 +22,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	//	"net/url"
-	"sort"
 	"strings"
 
 	"github.com/Costigan/warp/ccsds"
@@ -51,12 +49,16 @@ type Server struct {
 	Session *Session
 
 	// Internal state
-	clients             map[*websocket.Conn]*Client
-	packetDispatchTable *([][]*ccsds.PointInfo)
+	clients             *map[*websocket.Conn]*Client // immutable, updated by handleSubscriptions()
+	packetDispatchTable [2048]*apidDispatch          // values in slots are immutable, nil means no subscriptions, updated by handleSubscriptions()
 
 	// Channels
-	packetChan       chan ccsds.Packet           // incoming packets
-	subscriptionChan chan *subscriptionUpdateMsg // request to goroutine that manages subscriptions
+	packetChan chan ccsds.Packet // incoming packets
+
+	addClientChan                 chan *Client
+	removeClientChan              chan *Client
+	updateClientSubscriptionsChan chan *updateClientSubscriptionsMsg // add/remove subscriptions
+	rebuildApidDispatch           chan map[int]bool
 }
 
 // Run runs a web server
@@ -78,11 +80,15 @@ func (server *Server) Run() {
 		server.PersistancePrefix = "/couch"
 	}
 
-	// initialize internal state
-	server.clients = map[*websocket.Conn]*Client{}
-	server.packetChan = make(chan ccsds.Packet)
-	server.subscriptionChan = make(chan *subscriptionUpdateMsg)
-	server.packetDispatchTable = makeEmptyPacketDispatchTable()
+	// Initialize internal state
+
+	// Initialize channels
+	server.clients = &map[*websocket.Conn]*Client{}
+	server.packetChan = make(chan ccsds.Packet, 300)
+	server.addClientChan = make(chan *Client, 20)
+	server.removeClientChan = make(chan *Client, 20)
+	server.updateClientSubscriptionsChan = make(chan *updateClientSubscriptionsMsg, 20)
+	server.rebuildApidDispatch = make(chan map[int]bool, 20)
 
 	// For now, build in the session name
 	server.Session = &Session{Name: "demo"}
@@ -102,8 +108,16 @@ func (server *Server) Run() {
 
 	//	router.HandleFunc("/history", handleHTTP).Methods("GET")
 
+	router.HandleFunc("/history", func(w http.ResponseWriter, r *http.Request) {
+		handleHistory(server, w, r)
+	}).Methods("GET")
+
 	router.HandleFunc("/couch", handleCouch)
 	router.HandleFunc("/couch/{rest:.*}", handleCouch)
+
+	router.HandleFunc("/report", func(w http.ResponseWriter, r *http.Request) {
+		handleReport(server, w, r)
+	}).Methods("GET")
 
 	// WebSocket
 	router.HandleFunc(server.WebsocketPrefix, func(w http.ResponseWriter, req *http.Request) {
@@ -113,11 +127,13 @@ func (server *Server) Run() {
 	// Files
 	router.PathPrefix("/").Handler(http.StripPrefix("/", http.FileServer(http.Dir(server.StaticFiles))))
 
+	// add/remove clients, update subscriptions
 	go server.handleSubscriptions()
 
 	listenString := fmt.Sprintf("%s:%d", server.Host, server.Port)
 	fmt.Printf("listenString=%s\r\n", listenString)
 
+	// Don't actually start serving until now
 	log.Fatal(http.ListenAndServe(listenString, router))
 }
 
@@ -130,36 +146,115 @@ var upgrader = websocket.Upgrader{
 }
 
 func (server *Server) serveWS(w http.ResponseWriter, req *http.Request) {
+	//	fmt.Println("in serveWS")
 	conn, err := upgrader.Upgrade(w, req, nil)
 	if err != nil {
 		log.Println(err)
 		return
 	}
-
+	//	fmt.Println("in serveWS after upgrade")
 	client := newClient(server, conn)
-	server.clients[conn] = client
-	go client.writePump()
-	go client.readPump()
+	server.addClientChan <- client
 }
 
-func (server *Server) removeClient(client *Client) {
-	//TODO: This should do something with the channels
-	delete(server.clients, client.conn)
-}
+//
+// Handle Subscriptions
+//
+
+// All management of subscriptions is centralized here.  The
+// datastructures are contained on the server and client objects and
+// don't allow concurrent access.
+//
+// The implementation goals are:
+// 1. The code path that decom's and distributes telemetry can't be
+//    blocked while dispatch tables are updated
+// 2. Reasonably efficient (don't rebuild everything every time any
+//    subscription changes)
+// 3. Simplicity reduces bugs
+//
+// The dispatch table ...
 
 func (server *Server) handleSubscriptions() {
-	d := server.Session.Dictionary
+	dict := server.Session.Dictionary
 	for {
-		msg, ok := <-server.subscriptionChan
-		if !ok {
-			break
-		}
-		switch msg.verb {
-		case addSubscription:
-			badIDs := modifyClientSubscription(d, msg)
-			// Build the response to the client
+		select {
+
+		case client := <-server.addClientChan:
+			// add a client
+			oldClientMap := *server.clients
+			newClientMap := make(map[*websocket.Conn]*Client)
+			for oldconn, oldclient := range oldClientMap {
+				newClientMap[oldconn] = oldclient
+			}
+			newClientMap[client.conn] = client
+			server.clients = &newClientMap
+			// No need to touch the dispatch table
+
+			go client.writePump()
+			go client.readPump()
+
+		case client := <-server.removeClientChan:
+			oldConn := client.conn
+			client.conn = nil
+			// attempt to close the connection
+			if oldConn != nil {
+				err := oldConn.Close()
+				if err != nil {
+					fmt.Printf("removing client: error closing connection: %v", err.Error())
+				}
+			}
+
+			// remove a client; rebuild dispatch table
+			oldClientMap := *server.clients
+			newClientMap := make(map[*websocket.Conn]*Client)
+			for oldconn, oldclient := range oldClientMap {
+				if oldclient != client {
+					newClientMap[oldconn] = oldclient
+				}
+			}
+			server.clients = &newClientMap
+			// Update all apid subscriptions this client had
+			apids := make(map[int]bool)
+			for apid := range client.subscriptions {
+				apids[apid] = true
+			}
+			server.rebuildApidDispatch <- apids
+
+		case msg := <-server.updateClientSubscriptionsChan:
+			// Process a subscription request from a client
+			// Lookup the ids
+			points, badIDs := lookupSubscriptionIds(dict, msg.ids)
+			var apids map[int]bool
+
+			if len(points) > 0 {
+				// There are some points to process
+				newSubscriptions := copyClientSubscriptions(msg.client.subscriptions)
+				apids = make(map[int]bool) // keep track of all apids touched
+				for _, pt := range points {
+					apids[pt.APID] = true
+					bits := newSubscriptions[pt.APID]
+					if bits == nil {
+						pkt, _ := dict.GetPacketByAPID(pt.APID)
+						bits = newbitArray(len(pkt.Points))
+						newSubscriptions[pt.APID] = bits
+					}
+					if msg.isAdd {
+						bits.setBit(pt.SeqInPacket)
+					} else {
+						bits.clearBit(pt.SeqInPacket)
+					}
+				}
+				msg.client.subscriptions = newSubscriptions
+				server.rebuildApidDispatch <- apids
+			}
+
+			// Generate a response to the client
 			root := make(map[string]interface{})
-			root["response"] = "subscribe"
+			if msg.isAdd {
+				root["response"] = "subscribe"
+			} else {
+				root["response"] = "unsubscribe"
+			}
 			root["token"] = msg.token
 			if len(badIDs) > 0 {
 				root["status"] = "error"
@@ -168,89 +263,125 @@ func (server *Server) handleSubscriptions() {
 				root["status"] = "success"
 			}
 			sendJSON(root, msg.client)
-			server.updateDispatch() // Rebuild the subscription dispatch table
-		case deleteSubscription:
-			badIDs := modifyClientSubscription(d, msg)
-			// Build the response to the client
-			root := make(map[string]interface{})
-			root["response"] = "unsubscribe"
-			root["token"] = msg.token
-			if len(badIDs) > 0 {
-				root["status"] = "error"
-				root["bad_ids"] = badIDs
-			} else {
-				root["status"] = "success"
+
+		case apids := <-server.rebuildApidDispatch:
+
+			for apid := range apids {
+				pkt, ok := dict.GetPacketByAPID(apid)
+				if !ok {
+					continue
+				}
+				mask := newbitArray(len(pkt.Points))
+				clients := make([]*Client, 20)
+				for _, client := range *server.clients {
+					clientSubscriptions := client.subscriptions[apid]
+					if clientSubscriptions != nil && !clientSubscriptions.isZero() {
+						mask.orInto(*clientSubscriptions)
+						clients = append(clients, client)
+					}
+				}
+				if mask.isZero() {
+					// No subscriptions for this apid
+					server.packetDispatchTable[apid] = nil
+				} else {
+					// Build the apidDispatch
+					points := make([]*ccsds.PointInfo, len(pkt.Points))
+					for i, point := range pkt.Points {
+						if mask.getBit(i) {
+							points = append(points, point)
+						}
+					}
+					// Atomic update
+					server.packetDispatchTable[apid] = &apidDispatch{clients: clients, points: points}
+				}
 			}
-			sendJSON(root, msg.client)
-			server.updateDispatch() // Rebuild the subscription dispatch table
 		}
 	}
 }
 
-func modifyClientSubscription(d *ccsds.TelemetryDictionary, msg *subscriptionUpdateMsg) []string {
-	subscriptions := msg.client.subscriptions
-	badIDs := make([]string, 0, 8)
-	for _, id := range msg.ids {
+func copyClientSubscriptions(subscriptions map[int]*bitArray) map[int]*bitArray {
+	newSubscriptions := make(map[int]*bitArray, len(subscriptions))
+	for k, v := range subscriptions {
+		newSubscriptions[k] = v.copy()
+	}
+	return newSubscriptions
+}
+
+func lookupSubscriptionIds(dict *ccsds.TelemetryDictionary, ids []string) ([]*ccsds.PointInfo, []string) {
+	// The way the returned values are used, it doesn't matter if there are duplicate ids in the input, so I won't try to filter them out
+	points := make([]*ccsds.PointInfo, 0, len(ids))
+	badIDs := make([]string, 0, 10)
+	for _, id := range ids {
 		if strings.Contains(id, ".") {
-			if pt, ok := d.GetPointByID(id); ok {
-				subscriptions[pt] = true
+			if pt, ok := dict.GetPointByID(id); ok {
+				points = append(points, pt)
 			} else {
 				badIDs = append(badIDs, id)
 			}
 		} else {
-			if pi, ok := d.GetPacketByID(id); ok {
+			if pi, ok := dict.GetPacketByID(id); ok {
 				for _, pt := range pi.Points {
-					subscriptions[pt] = true
+					points = append(points, pt)
 				}
 			} else {
 				badIDs = append(badIDs, id)
 			}
 		}
 	}
-	return badIDs
+	return points, badIDs
+}
+
+// One of these will be stored in each element of the decom dispatch
+// table These are function (won't be modified), only rebuilt.  The
+// entries in the dispatch table can be changed as atomic operations
+
+type apidDispatch struct {
+	clients []*Client
+	points  []*ccsds.PointInfo
 }
 
 //
-// Packet Decom
+// Realtime Packet Decomm
 //
 
-func (server *Server) updateDispatch() {
-	// Collect all PointInfos from all client subscription tables.  Eliminate duplicates
-	m := make(map[*ccsds.PointInfo]bool)
-	for _, client := range server.clients {
-		for pointInfo := range client.subscriptions {
-			m[pointInfo] = true
-		}
+func (server *Server) packetPump() {
+	packetChan := server.packetChan
+	for {
+		pkt := <-packetChan
+		msg := decomPacket(pkt, server.packetDispatchTable) // Refetch the table every time
+		fmt.Println(string(msg))
 	}
-
-	// Convert the unique PointInfos to a list, then sort
-	points := make(byID, 0, 128)
-	for pointInfo := range m {
-		points = append(points, pointInfo)
-	}
-	sort.Sort(byID(points))
-
-	table := makeEmptyPacketDispatchTable()
-	for _, pointInfo := range points {
-		(*table)[pointInfo.APID] = append((*table)[pointInfo.APID], pointInfo)
-	}
-
-	// Now, update the dispatch table.  This is a single assignment and is atomic
-	server.packetDispatchTable = table
 }
 
-type byID []*ccsds.PointInfo
+func decomPacket(pkt ccsds.Packet, dispatchTable [2048]*apidDispatch) []byte {
+	return make([]byte, 0)
+}
 
-func (l byID) Len() int           { return len(l) }
-func (l byID) Swap(i, j int)      { l[i], l[j] = l[j], l[i] }
-func (l byID) Less(i, j int) bool { return (*l[i]).ID < (l[j]).ID }
+//
+// HandleHistory
+//
 
-func makeEmptyPacketDispatchTable() *([][]*ccsds.PointInfo) {
-	table := make([][]*ccsds.PointInfo, 2048, 2048)
-	for i := 0; i < 2048; i++ {
-		table[i] = make([]*ccsds.PointInfo, 0, 8)
+func handleHistory(server *Server, w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("history: req=%v\n", r.URL)
+	prepareHeader(w, r)
+	json.NewEncoder(w).Encode(RestErrorResponse{Error: "SessionNotFound", Message: "Session not found"})
+}
+
+//
+// HandleReport
+//
+
+func handleReport(server *Server, w http.ResponseWriter, r *http.Request) {
+	clients := *server.clients
+	connections := make([]ReportWebsocketConnection, len(clients))
+	for conn, client := range clients {
+		ids := client.getSubscriptionIDs()
+		connections = append(connections, ReportWebsocketConnection{Address: conn.RemoteAddr().String(), SubscriptionCount: len(ids), IDs: ids})
 	}
-	return &table
+
+	response := ReportTemplate{Version: "0.1", Session: *server.Session, Connections: connections, ConnectionCount: len(connections)}
+	prepareHeader(w, r)
+	json.NewEncoder(w).Encode(response)
 }
 
 ////////////////////////////////////////////////////////////////////////
@@ -261,16 +392,16 @@ func makeEmptyPacketDispatchTable() *([][]*ccsds.PointInfo) {
 type Client struct {
 	server        *Server
 	conn          *websocket.Conn
-	msgChan       chan clientMsg
-	subscriptions map[*ccsds.PointInfo]bool
+	msgChan       chan []byte       // Client receives msgs from channel and sends to the websocket connection
+	subscriptions map[int]*bitArray // immutable
 }
 
 func newClient(server *Server, conn *websocket.Conn) *Client {
 	return &Client{
 		server:        server,
 		conn:          conn,
-		msgChan:       make(chan clientMsg),
-		subscriptions: make(map[*ccsds.PointInfo]bool),
+		msgChan:       make(chan []byte, 32),
+		subscriptions: make(map[int]*bitArray),
 	}
 }
 
@@ -281,14 +412,23 @@ func newClient(server *Server, conn *websocket.Conn) *Client {
 func (client *Client) readPump() {
 	for {
 		messageType, p, err := client.conn.ReadMessage()
-		if err != nil {
-			log.Println(err)
+		if messageType == websocket.CloseMessage {
+			requestRemoveClient(client)
+			log.Printf("websocket: %s closed", client.conn.RemoteAddr().String())
 			return
-		}
-		if messageType != websocket.TextMessage {
-			log.Printf("websocket(%s) received a non-text message", client.conn.RemoteAddr().String())
-			client.conn.Close()
-			delete(client.server.clients, client.conn)
+		} else if err != nil {
+			oldConn := client.conn
+			requestRemoveClient(client)
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived, websocket.CloseAbnormalClosure) {
+				log.Printf("websocket(%s) closed unexpectedly: %v", client.conn.RemoteAddr().String(), err.Error())
+			} else {
+				log.Printf("websocket: %s closed", oldConn.RemoteAddr().String())
+			}
+			return
+		} else if messageType != websocket.TextMessage {
+			oldConn := client.conn
+			requestRemoveClient(client)
+			log.Printf("websocket(%s) received a non-text message of type %d", oldConn.RemoteAddr().String(), messageType)
 			return
 		}
 
@@ -332,16 +472,18 @@ func (client *Client) readPump() {
 			if err1 == nil {
 				err2 = client.handleUnsubscribe(&msg)
 			}
+		case "report-subscriptions":
+			client.handleReportSubscriptions()
 		default:
 			err1 = fmt.Errorf("websocket(%s) received a request(%s) with no handler: %s", client.conn.RemoteAddr().String(), msgVerb, string(p))
 		}
 
 		if err1 != nil {
 			log.Printf("websocket(%s) error parsing %s request: %v", client.conn.RemoteAddr().String(), msgVerb, err1)
-			sendJSON(ErrorResponse{Response: msgVerb, Token: msgToken, Error: err.Error()}, client)
+			sendJSON(ErrorResponse{Response: msgVerb, Token: msgToken, Error: err1.Error()}, client)
 		} else if err2 != nil {
 			log.Printf("websocket(%s) error processing %s request: %v", client.conn.RemoteAddr().String(), msgVerb, err2)
-			sendJSON(ErrorResponse{Response: msgVerb, Token: msgToken, Error: err.Error()}, client)
+			sendJSON(ErrorResponse{Response: msgVerb, Token: msgToken, Error: err2.Error()}, client)
 		}
 	}
 }
@@ -351,19 +493,28 @@ func (client *Client) readPump() {
 //
 
 func (client *Client) writePump() {
-	for {
-		msg := <-client.msgChan
-		err := client.conn.WriteMessage(websocket.TextMessage, msg.bytes)
-		if err != nil {
-			log.Printf("websocket(%s) error on write: %v", client.conn.RemoteAddr().String(), err)
-			client.server.removeClient(client)
+	for msg := range client.msgChan {
+		c := client.conn
+		if c == nil {
+			continue
+		}
+		err := c.WriteMessage(websocket.TextMessage, msg)
+		if err == websocket.ErrCloseSent {
+			requestRemoveClient(client)
 			return
 		}
-		if len(msg.clients) > 0 {
-			msg.clients[0].msgChan <- clientMsg{clients: msg.clients[1:], bytes: msg.bytes}
+		if err != nil {
+			log.Printf("websocket(%s) error on write: %v", client.conn.RemoteAddr().String(), err)
+			requestRemoveClient(client)
+			return
 		}
-		// Drop the bytes on the floor here.  Later, send back to the server
 	}
+	// Drop the bytes on the floor here.  Later, send back to the server
+}
+
+func requestRemoveClient(client *Client) {
+	client.conn = nil
+	client.server.removeClientChan <- client
 }
 
 //
@@ -376,13 +527,33 @@ func (client *Client) handlePing(r *PingRequest) error {
 }
 
 func (client *Client) handleSubscribe(r *SubscribeRequest) error {
-	client.server.subscriptionChan <- &subscriptionUpdateMsg{verb: addSubscription, ids: r.IDs, client: client, token: r.Token}
+	client.server.updateClientSubscriptionsChan <- &updateClientSubscriptionsMsg{isAdd: true, ids: r.IDs, client: client, token: r.Token}
 	return nil
 }
 
 func (client *Client) handleUnsubscribe(r *UnsubscribeRequest) error {
-	client.server.subscriptionChan <- &subscriptionUpdateMsg{verb: deleteSubscription, ids: r.IDs, client: client, token: r.Token}
+	client.server.updateClientSubscriptionsChan <- &updateClientSubscriptionsMsg{isAdd: false, ids: r.IDs, client: client, token: r.Token}
 	return nil
+}
+
+func (client *Client) handleReportSubscriptions() {
+	sendJSON(ReportSubscriptionsResponse{response: "report-subscriptions", ids: client.getSubscriptionIDs()}, client)
+}
+
+func (client *Client) getSubscriptionIDs() []string {
+	ids := make([]string, 0, 256)
+	dict := client.server.Session.Dictionary
+	subscriptions := client.subscriptions
+	for apid, bits := range subscriptions {
+		if pkt, ok := dict.GetPacketByAPID(apid); ok {
+			for i, pt := range pkt.Points {
+				if bits.getBit(i) {
+					ids = append(ids, pt.ID)
+				}
+			}
+		}
+	}
+	return ids
 }
 
 //
@@ -391,8 +562,8 @@ func (client *Client) handleUnsubscribe(r *UnsubscribeRequest) error {
 
 // send a message to one or more clients
 func send(msg []byte, clients ...*Client) {
-	if len(clients) > 0 {
-		clients[0].msgChan <- clientMsg{bytes: msg, clients: clients[1:]}
+	for i := 0; i < len(clients); i++ {
+		clients[i].msgChan <- msg
 	}
 }
 
@@ -409,7 +580,7 @@ func sendJSON(msg interface{}, clients ...*Client) {
 }
 
 //
-// Public Message Templates
+// Public Websocket Message Templates
 //
 
 // PingRequest is a message template.  Also used as a minimal request
@@ -461,21 +632,31 @@ type ErrorResponse struct {
 	Error    string      `json:"error"`
 }
 
+type ReportSubscriptionsResponse struct {
+	response string   `json:"response"`
+	ids      []string `json:"ids"`
+}
+
+//
+// Public REST Message Templates
+//
+
+// RestErrorResponse is a message template
+type RestErrorResponse struct {
+	Error   string `json:"error"`
+	Message string `json:"message"`
+}
+
 //
 // Internal Message Templates
 //
 
-type subscriptionUpdateMsg struct {
+type updateClientSubscriptionsMsg struct {
 	client *Client
-	verb   int
+	isAdd  bool
 	token  interface{}
 	ids    []string
 }
-
-const (
-	addSubscription    = int(iota)
-	deleteSubscription = int(iota)
-)
 
 // clientMsg contains a single message for one or more clients.
 type clientMsg struct {
@@ -489,9 +670,9 @@ type clientMsg struct {
 
 // Session holds session information.  Note that a warp process can host only a single session
 type Session struct {
-	Name           string
-	Dictionary     *ccsds.TelemetryDictionary
-	DictionaryRoot *DictionaryRootResponse
+	Name           string                     `json:"name"`
+	Dictionary     *ccsds.TelemetryDictionary `json:"-"`
+	DictionaryRoot *DictionaryRootResponse    `json:"-"`
 }
 
 func (session *Session) loadDictionary() error {
@@ -532,7 +713,7 @@ func handleHTTP(w http.ResponseWriter, req *http.Request) {
 func handleCouch(w http.ResponseWriter, req *http.Request) {
 	splits := strings.Split(req.URL.Path, string(os.PathSeparator))
 	remoteURL := "http://localhost:5984/" + filepath.Join(splits[2:]...)
-	fmt.Printf("couch: req=%v remote=%v\n", req.URL, remoteURL)
+	//	fmt.Printf("couch: req=%v remote=%v\n", req.URL, remoteURL)
 	resp, err := http.DefaultClient.Get(remoteURL)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
@@ -566,7 +747,7 @@ func handleDictionaryGetID(server *Server, w http.ResponseWriter, r *http.Reques
 	prepareHeader(w, r)
 	vars := mux.Vars(r)
 	id := vars["id"]
-	fmt.Printf("in handleDictionaryGetID: id=%s\r\n", id)
+	//	fmt.Printf("in handleDictionaryGetID: id=%s\r\n", id)
 	if strings.Contains(id, ".") {
 		// We're asking for a point
 		if pt, ok := server.Session.Dictionary.GetPointByID(id); ok {
@@ -585,7 +766,7 @@ func handleDictionaryGetID(server *Server, w http.ResponseWriter, r *http.Reques
 }
 
 func prepareHeader(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Allow-Origin", "*")
 	w.Header().Set("Cache-Control", "public, max-age=60")
 	w.Header().Add("Content-Type", "application/json")
 }
@@ -726,4 +907,100 @@ type PointValuesTemplate struct {
 	Name   string      `json:"name"`
 	Format string      `json:"format"`
 	Hints  interface{} `json:"hints"`
+}
+
+type ReportTemplate struct {
+	Version         string                      `json:"version"`
+	Session         Session                     `json:"session"`
+	Connections     []ReportWebsocketConnection `json:"connections"`
+	ConnectionCount int                         `json:"connection_count"`
+}
+
+type ReportWebsocketConnection struct {
+	Address           string   `json:"address"`
+	SubscriptionCount int      `json:"subscription_count"`
+	IDs               []string `json:"ids"`
+}
+
+////////////////////////////////////////////////////////////////////////
+// Utilities
+////////////////////////////////////////////////////////////////////////
+
+type byID []*ccsds.PointInfo
+
+func (l byID) Len() int           { return len(l) }
+func (l byID) Swap(i, j int)      { l[i], l[j] = l[j], l[i] }
+func (l byID) Less(i, j int) bool { return (*l[i]).ID < (l[j]).ID }
+
+//
+// Bit Array
+//
+
+type bitArray []uint64
+
+func newbitArray(count int) *bitArray {
+	if count < 0 {
+		r := bitArray(make([]uint64, 0))
+		return &r
+	}
+	r := bitArray(make([]uint64, count/64))
+	return &r
+}
+
+func (b bitArray) setBit(pos int) error {
+	cell, bitpos := b.getPosition(pos)
+	if cell < 0 || cell >= len(b) {
+		return fmt.Errorf("bit position out-of-range: %d", pos)
+	}
+	b[cell] = b[cell] | (1 << bitpos)
+	return nil
+}
+
+func (b bitArray) clearBit(pos int) error {
+	cell, bitpos := b.getPosition(pos)
+	if cell < 0 || cell >= len(b) {
+		return fmt.Errorf("bit position out-of-range: %d", pos)
+	}
+	b[cell] = b[cell] & (^(1 << bitpos))
+	return nil
+}
+
+func (b bitArray) getBit(pos int) bool {
+	cell, bitpos := b.getPosition(pos)
+	if cell < 0 || cell >= len(b) {
+		return false
+	}
+	if (b[cell] & (1 << bitpos)) == 0 {
+		return false
+	}
+	return true
+}
+
+func (b bitArray) orInto(o bitArray) {
+	max := len(b)
+	if len(o) < max {
+		max = len(o)
+	}
+	for i := 0; i < max; i++ {
+		b[i] = b[i] | o[i]
+	}
+}
+
+func (b bitArray) isZero() bool {
+	for i := 0; i < len(b); i++ {
+		if b[i] != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (b bitArray) copy() *bitArray {
+	r := bitArray(make([]uint64, len(b)))
+	copy(r, b)
+	return &r
+}
+
+func (b bitArray) getPosition(pos int) (int, uint) {
+	return pos / 64, uint(pos) % 64
 }

@@ -55,6 +55,8 @@ type PointInfo struct {
 
 	ConversionFunction *ConversionName
 	Conversion         IConversion
+
+	SeqInPacket   int  `json:"-"`
 }
 
 //
@@ -725,6 +727,22 @@ func LoadDictionary(filename string) (*TelemetryDictionary, error) {
 		return nil, fmt.Errorf("error deserializing dictionary in %s:%v", filename, err)
 	}
 
+	// Remove packets that are tables and/or have out-of-range apids
+	dictionary.Packets = dictionary.Packets.Filter(func(pkt *PacketInfo) bool {
+		if pkt.IsTable {
+			return false
+		}
+		apid := pkt.APID
+		if apid < 0 || apid > 2047 {
+			return false
+		}
+		id := strings.ToLower(pkt.ID)
+		if strings.Contains(id, "_table") || strings.Contains(id, "_tbl") {
+			return false
+		}
+		return true
+	})
+
 	// Make sure all points have the correct apid
 	for _, pi := range dictionary.Packets {
 		for _, pt := range pi.Points {
@@ -735,10 +753,8 @@ func LoadDictionary(filename string) (*TelemetryDictionary, error) {
 	// index packets by apid
 	// Copy packet pointers to a lookup array for faster access
 	for i, info := range dictionary.Packets {
-		id := strings.ToLower(info.ID)
 		apid := info.APID
-		// Ignore tables and out-of-range apids.  It also just takes the first apid for each array slot
-		if !strings.Contains(id, "table") && !strings.Contains(id, "tbl") && apid >= 0 && apid < 2048 && dictionary.PacketAPIDLookup[apid] == nil {
+		if dictionary.PacketAPIDLookup[apid] == nil {
 			dictionary.PacketAPIDLookup[apid] = dictionary.Packets[i]
 		}
 	}
@@ -766,6 +782,13 @@ func LoadDictionary(filename string) (*TelemetryDictionary, error) {
 	for _, p := range dictionary.Packets {
 		ptlist := p.Points
 		sort.Sort(ptlist)
+	}
+
+	// Assign the point sequence numbers
+	for _, pkt := range dictionary.Packets {
+		for i, pt := range pkt.Points {
+			pt.SeqInPacket = i
+		}
 	}
 
 	return &dictionary, nil
@@ -899,6 +922,17 @@ func (slice PacketInfoSlice) Less(i, j int) bool {
 
 func (slice PacketInfoSlice) Swap(i, j int) {
 	slice[i], slice[j] = slice[j], slice[i]
+}
+
+// Filter returns a new slice containing all PacketInfos that satisfy a predicate pred
+func (slice PacketInfoSlice) Filter(pred func(p *PacketInfo) bool) PacketInfoSlice {
+	result := make(PacketInfoSlice, 0)
+	for _, v := range slice {
+		if pred(v) {
+			result = append(result, v)
+		}
+	}
+	return result
 }
 
 // PointInfoSlice is needed because go is deficient in some ways (this supports sorting)

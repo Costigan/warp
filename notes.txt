@@ -2,12 +2,14 @@ Golang Notes
 
 
 
-  warp server   Serves a single session
-       --session-dir=<dir>  location for history
-       --overwrite
-       --dictionary=<dictionary_filename>
-       --
+  warp server					Serves a single session
+       --session-dir=<dir>			location for history & dictionary
+       --dictionary=<dictionary_filename>	override dictionary location
+       --in=<stream_spec>
+       --format-in=
 
+       --files=
+       --bps=<rate>
 
   warp csv
        --dictionary=<dictionary_filename>
@@ -15,8 +17,12 @@ Golang Notes
        --packets=<packet_files>
        --frame=<frame_files>
 
-  warp filter	Transforms telemetry data from one format to another
-
+  warp filter					Transforms telemetry data from one format to another
+       --dictionary=<dictionary_filename>	override dictionary location
+       --in=<in_stream_spec>
+       --format-in=frames|packets|itos_bson|packet_json|prechannelized_json|csv
+       --out=<out_stream_spec>
+       --format-out=frames|packets|itos_bson|packet_json|prechannelized_json|pkt_summary|pkt_contents|pkt_hex|pkt_counts
   
 
   warp manager	Manage a set of sessions
@@ -26,6 +32,16 @@ Golang Notes
 
 ------------------------------------------------------------------------------
 * Main project
+
+--tcp-client
+--tcp-server
+--udp
+--multicast
+--port <n>
+--host <hostname>
+--packets
+--frames
+
 
 
 
@@ -44,7 +60,7 @@ Golang Notes
 	 --simulate
 
     -d   --dictionary|dict=<filename>
-	 --in=<stream_spec>
+	 --in=<in_stream_spec>
 	 --format-in=frames|packets|itos_bson|packet_json|prechannelized_json|csv
 	 --out=<stream_spec>
 	 --format-out=frames|packets|itos_bson|packet_json|prechannelized_json|csv|pkt_summary|pkt_contents|pkt_binary|pkt_counts
@@ -55,17 +71,15 @@ Golang Notes
 	 --database-path=<database_path>
 	 --session-path=<session_path>
 
-    Where <stream_spec>=
-	 tcp-client[:host][:port]
-	 tcp-server[:port]
-	 udp[:host][:port]
+    Where <in_stream_spec>=
+	 tcp:host:port
+	 tcp:port
+	 udp:port
 	 multicast[:host][:port]
 	 file:<filename>
 	 file:'glob_pattern'
 	 dds:??
 	 stdin|stdout|stderr
-	 history[:session][:host][:port][database_path]
-	 session[:host][:port][:session_path]
 
     Where <apid_spec>=
 	  <int>

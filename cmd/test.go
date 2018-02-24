@@ -42,10 +42,15 @@ var testCmd = &cobra.Command{
 	},
 }
 
+var doTestWebsocketPings bool
+var doTestWebsocketSubscriptions bool
 var doTestWebsocketDecom bool
 var doTestWebsocketHistory bool
 var doTestRestHistory bool
 var doTestRestDictionary bool
+
+var workerCount int
+var workerCycles int
 
 var serverHost = "localhost"
 var serverPort = 8000
@@ -67,10 +72,15 @@ func init() {
 
 	// Consider adding a help flag here to override the default.  The default takes the -h option, which I'd like to use for host
 
-	testCmd.Flags().BoolVar(&doTestWebsocketDecom, "ws-decom", false, "Test websocket subscription and decom service")
-	testCmd.Flags().BoolVar(&doTestWebsocketHistory, "ws-history", false, "Test websocket history service")
-	testCmd.Flags().BoolVar(&doTestRestHistory, "rest-history", false, "Test REST history service")
-	testCmd.Flags().BoolVar(&doTestRestDictionary, "rest-dictionary", false, "Test REST dictionary service")
+	testCmd.Flags().BoolVar(&doTestWebsocketPings, "ws-ping", false, "Test websocket pings")
+	testCmd.Flags().BoolVar(&doTestWebsocketSubscriptions, "ws-sub", false, "Test websocket subscriptions (add & remove subscriptions)")
+	testCmd.Flags().BoolVar(&doTestWebsocketDecom, "ws-decom", false, "Test websocket subscriptions and decom")
+	testCmd.Flags().BoolVar(&doTestWebsocketHistory, "ws-history", false, "Test websocket history")
+	testCmd.Flags().BoolVar(&doTestRestHistory, "rest-history", false, "Test REST history endpoints")
+	testCmd.Flags().BoolVar(&doTestRestDictionary, "rest-dictionary", false, "Test REST dictionary endpoints")
+
+	testCmd.Flags().IntVar(&workerCount, "workers", 1, "Number of workers testing in parallel")
+	testCmd.Flags().IntVar(&workerCycles, "cycles", 1, "Number of cycles of testing each worker should do (details depend on the test)")
 
 	testCmd.Flags().StringVar(&serverHost, "host", "localhost", "Hostname where a warp server will be running")
 	testCmd.Flags().IntVar(&serverPort, "port", 8000, "Port where a warp server will be running")
@@ -181,11 +191,11 @@ func test5(args []string) {
 	fmt.Printf("There are %d packets in %s", len((*dictionary).Packets), dictionaryFilename)
 
 	packetFilename := "C:/RP/data/test_data/pktfile.1"
-	fmt.Printf("Reading packet filename %s\r\n", packetFilename)
+	fmt.Printf("Reading packet filename %s\n", packetFilename)
 	pktfile := ccsds.PacketFile{Filename: packetFilename}
 	pktfile.Iterate(func(p ccsds.Packet) {
 		apid := p.APID()
-		fmt.Printf("apid=%d len=%d\r\n", apid, p.Length())
+		fmt.Printf("apid=%d len=%d\n", apid, p.Length())
 		packetInfo := (*dictionary).PacketAPIDLookup[apid]
 		if packetInfo == nil {
 			return
@@ -196,7 +206,7 @@ func test5(args []string) {
 				fmt.Printf("    Error extracting %s\n", pt.ID)
 				continue
 			}
-			fmt.Printf("    %s = %v\r\n", pt.ID, v)
+			fmt.Printf("    %s = %v\n", pt.ID, v)
 		}
 	})
 }
@@ -204,11 +214,12 @@ func test5(args []string) {
 var netClient = &http.Client{Timeout: time.Second * 10}
 
 func test6(cmd *cobra.Command, args []string) {
-	fmt.Printf("doTestWebsocketDecom=%v\r\n", doTestWebsocketDecom)
-	fmt.Printf("doTestWebsocketHistory=%v\r\n", doTestWebsocketHistory)
-	fmt.Printf("doTestRestHistory=%v\r\n", doTestRestHistory)
-	fmt.Printf("doTestRestDictionary=%v\r\n", doTestRestDictionary)
-	fmt.Printf("serverPort=%v\r\n", serverPort)
+	fmt.Printf("doTestWebsocketSubscriptions=%v\n", doTestWebsocketSubscriptions)
+	fmt.Printf("doTestWebsocketDecom=%v\n", doTestWebsocketDecom)
+	fmt.Printf("doTestWebsocketHistory=%v\n", doTestWebsocketHistory)
+	fmt.Printf("doTestRestHistory=%v\n", doTestRestHistory)
+	fmt.Printf("doTestRestDictionary=%v\n", doTestRestDictionary)
+	fmt.Printf("serverPort=%v\n", serverPort)
 
 	dictionaryPrefix = "http://" + serverHost + ":" + fmt.Sprintf("%d", serverPort) + "/dictionary/" + sessionName
 
@@ -217,8 +228,8 @@ func test6(cmd *cobra.Command, args []string) {
 	if doTestRestDictionary {
 		testRestDictionary()
 	}
-	if doTestWebsocketDecom {
-		testWebsocketDecom(1)
+	if doTestWebsocketDecom || doTestWebsocketSubscriptions {
+		testWebsockets()
 	}
 }
 
@@ -241,13 +252,6 @@ func testRestDictionary() {
 		fmt.Printf("error unmarshalling response to dictionary root: %v", err)
 		return
 	}
-
-	//fmt.Println("Received valid json from dictionary root")
-	//if bytes, err2 := json.MarshalIndent(dict, "", "    "); err2 == nil {
-	//	fmt.Println(string(bytes))
-	//} else {
-	//	fmt.Printf("error unmarshalling response to dictionary root: %v", err2)
-	//}
 
 	// fetch each packet by id
 	var responseMap = map[string][]byte{}
@@ -276,7 +280,7 @@ func testRestDictionary() {
 		if err := json.Unmarshal(pktBytes, &pktStruct); err != nil {
 			fmt.Printf("error unmarshalling dictionary %s packet response: %v", pktID, err)
 		} else {
-			fmt.Printf("correct unmarshalling of %s\r\n", pktID)
+			fmt.Printf("correct unmarshalling of %s\n", pktID)
 		}
 	}
 }
@@ -290,7 +294,7 @@ func fetchURL(prefix string, path string) ([]byte, bool) {
 	defer r.Body.Close()
 	body, err2 := ioutil.ReadAll(r.Body)
 	if err2 != nil {
-		fmt.Printf("error fetching %s: %v\r\n", path, err2)
+		fmt.Printf("error fetching %s: %v\n", path, err2)
 		return nil, false
 	}
 	return body, true
@@ -307,65 +311,78 @@ const (
 	maxMessageSize = 512                 // Maximum message size allowed from peer.
 )
 
-type websocketTester struct {
+type websocketWorker struct {
+	id     int
 	target url.URL
 	conn   *websocket.Conn
 }
 
-func testWebsocketDecom(count int) {
-	fmt.Printf("in doTestWebsocketDecom\r\n")
-	u := url.URL{Scheme: "ws", Host: fmt.Sprintf("%s:%d", "localhost", serverPort), Path: "/realtime"}
+func testWebsockets() {
+	fmt.Printf("in doTestWebsocketDecom\n")
+	u := url.URL{Scheme: "ws", Host: fmt.Sprintf("%s:%d", "localhost", serverPort), Path: "/realtime/"}
 	var wg sync.WaitGroup
-	wg.Add(count)
-	for i := 0; i < count; i++ {
-		tester := websocketTester{target: u}
-		fmt.Printf("created tester %d\r\n", i)
+	wg.Add(workerCount)
+	for i := 0; i < workerCount; i++ {
+		tester := websocketWorker{id: i, target: u}
+		fmt.Printf("created tester %d\n", i)
 		go func() { tester.run(&wg) }()
 	}
 	wg.Wait()
-	fmt.Printf("Exiting doTestWebsocketDecom\r\n")
+	fmt.Printf("Exiting doTestWebsockets\n")
 }
 
-func (tester *websocketTester) run(wg *sync.WaitGroup) {
-	fmt.Printf("connecting to %s\r\n", tester.target.String())
+func (worker *websocketWorker) run(wg *sync.WaitGroup) {
+	fmt.Printf("connecting to %s\n", worker.target.String())
 
-	c, _, err := websocket.DefaultDialer.Dial(tester.target.String(), nil)
+	c, resp, err := websocket.DefaultDialer.Dial(worker.target.String(), nil)
+	if err == websocket.ErrBadHandshake {
+		log.Printf("handshake failed with status %d", resp.StatusCode)
+		buf := new(bytes.Buffer)
+		buf.ReadFrom(resp.Body)
+		log.Printf("body: %v", buf.String())
+		log.Fatal("Exiting.")
+	}
 	if err != nil {
 		log.Fatal("dial:", err)
 	}
-	defer c.Close()
+	defer func() {
+		c.Close()
+		defer wg.Done()
+	}()
 
-	tester.conn = c
+	worker.conn = c
 
-	fmt.Printf("Connected.  Sending pings ...\r\n")
+	if doTestWebsocketPings {
+		fmt.Printf("Connected.  Sending pings ...\n")
 
-	for i := 0; i < 10; i++ {
-		fmt.Printf("Sending ping %d...\r\n", i)
-		if !tester.sendJSON(server.PingRequest{Request: "ping", Token: "t1"}) {
-			fmt.Printf("Error sending ping\r\n")
-			return
+		for i := 0; i < workerCycles; i++ {
+			fmt.Printf("worker %d: Sending ping %d...\n", worker.id, i)
+			if !worker.sendJSON(server.PingRequest{Request: "ping", Token: "t1"}) {
+				fmt.Printf("Error sending ping\n")
+				return
+			}
+			_, bytes, err := worker.conn.ReadMessage()
+			if err != nil {
+				fmt.Printf("Worker %d: Error receiving ping reply: %v", worker.id, err)
+				return
+			}
+			fmt.Printf("Worker %d: Received ping reply %d: %s\n", worker.id, i, string(bytes))
 		}
-		_, bytes, err := tester.conn.ReadMessage()
-		if err != nil {
-			fmt.Printf("Error receiving ping reply: %v", err)
-			return
-		}
-		fmt.Printf("  received ping reply %d: %s\r\n", i, string(bytes))
 	}
 }
 
-func (tester *websocketTester) sendJSON(msg interface{}) bool {
+func (worker *websocketWorker) sendJSON(msg interface{}) bool {
 	if bytes, err := json.Marshal(msg); err == nil {
-		return tester.send(bytes)
+		return worker.send(bytes)
 	}
 	log.Printf("Error preparing json for a message: %s", msg)
 	return false
 }
 
-func (tester *websocketTester) send(msg []byte) bool {
-	if err := tester.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+func (worker *websocketWorker) send(msg []byte) bool {
+	if err := worker.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 		fmt.Printf("Error writing websocket message: %v", err)
-		if err1 := tester.conn.Close(); err1 != nil {
+		if err1 := worker.conn.Close(); err1 != nil {
 			fmt.Printf("Error closing websocket connection: %v", err1)
 		}
 		return false
