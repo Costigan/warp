@@ -15,12 +15,14 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 
@@ -59,6 +61,8 @@ type Server struct {
 	removeClientChan              chan *Client
 	updateClientSubscriptionsChan chan *updateClientSubscriptionsMsg // add/remove subscriptions
 	rebuildApidDispatch           chan map[int]bool
+
+	StopRequest chan os.Signal
 }
 
 // Run runs a web server
@@ -67,6 +71,7 @@ func (server *Server) Run() {
 	if server.Port == 0 {
 		server.Port = 8000
 	}
+	// The default server.Host is ""
 	if server.DictionaryPrefix == "" {
 		server.DictionaryPrefix = "/dictionary"
 	}
@@ -116,7 +121,11 @@ func (server *Server) Run() {
 	router.HandleFunc("/couch/{rest:.*}", handleCouch)
 
 	router.HandleFunc("/report", func(w http.ResponseWriter, r *http.Request) {
-		handleReport(server, w, r)
+		server.handleReport(w, r)
+	}).Methods("GET")
+
+	router.HandleFunc("/shutdown", func(w http.ResponseWriter, r *http.Request) {
+		server.handleShutdown(w, r)
 	}).Methods("GET")
 
 	// WebSocket
@@ -130,11 +139,23 @@ func (server *Server) Run() {
 	// add/remove clients, update subscriptions
 	go server.handleSubscriptions()
 
-	listenString := fmt.Sprintf("%s:%d", server.Host, server.Port)
-	fmt.Printf("listenString=%s\r\n", listenString)
+	addr := fmt.Sprintf("%s:%d", server.Host, server.Port)
+	h := &http.Server{Addr: addr, Handler: router}
 
-	// Don't actually start serving until now
-	log.Fatal(http.ListenAndServe(listenString, router))
+	// Receive interrupts and shut down gracefully
+	server.StopRequest = make(chan os.Signal, 2)
+	signal.Notify(server.StopRequest, os.Interrupt)
+
+	// Run the server
+	go func() {
+		log.Printf("Listening on %s\n", addr)
+		log.Fatal(h.ListenAndServe())
+	}()
+
+	<-server.StopRequest
+	log.Printf("Shutting down the server ...\n")
+	h.Shutdown(context.Background())
+	log.Printf("Server gracefully stopped.\n")
 }
 
 var upgrader = websocket.Upgrader{
@@ -371,7 +392,7 @@ func handleHistory(server *Server, w http.ResponseWriter, r *http.Request) {
 // HandleReport
 //
 
-func handleReport(server *Server, w http.ResponseWriter, r *http.Request) {
+func (server *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	clients := *server.clients
 	connections := make([]ReportWebsocketConnection, len(clients))
 	for conn, client := range clients {
@@ -383,6 +404,20 @@ func handleReport(server *Server, w http.ResponseWriter, r *http.Request) {
 	prepareHeader(w, r)
 	json.NewEncoder(w).Encode(response)
 }
+
+//
+// HandleShutdown
+//
+
+func (server *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	server.StopRequest <- &FakeInterrupt{}
+}
+
+type FakeInterrupt struct{}
+
+func (f *FakeInterrupt) String() string { return "fake interrupt" }
+
+func (f FakeInterrupt) Signal() {}
 
 ////////////////////////////////////////////////////////////////////////
 // Client
