@@ -25,8 +25,9 @@ type TelemetryDictionary struct {
 	MapConversions   []*DiscreteConversionMap
 	RangeConversions []*DiscreteConversionRangeList
 	PolyConversions  []*PolynomialConversion
-	PacketAPIDLookup [2048]*PacketInfo
+	PacketAPIDLookup [2048][]*PacketInfo
 	PacketIDLookup   map[string]*PacketInfo // ids are lowercase'd
+	PointIDLookup    map[string]*PointInfo  // ids are lowercase'd
 }
 
 // PacketInfo describes a single packet
@@ -56,7 +57,7 @@ type PointInfo struct {
 	ConversionFunction *ConversionName
 	Conversion         IConversion
 
-	SeqInPacket   int  `json:"-"`
+	BitArrayIndex int `json:"-"`
 }
 
 //
@@ -754,9 +755,9 @@ func LoadDictionary(filename string) (*TelemetryDictionary, error) {
 	// Copy packet pointers to a lookup array for faster access
 	for i, info := range dictionary.Packets {
 		apid := info.APID
-		if dictionary.PacketAPIDLookup[apid] == nil {
-			dictionary.PacketAPIDLookup[apid] = dictionary.Packets[i]
-		}
+		lst := dictionary.PacketAPIDLookup[apid]
+		lst = append(lst, dictionary.Packets[i])
+		dictionary.PacketAPIDLookup[apid] = lst
 	}
 
 	// index packets by id (include tables)
@@ -785,9 +786,29 @@ func LoadDictionary(filename string) (*TelemetryDictionary, error) {
 	}
 
 	// Assign the point sequence numbers
+	// This does some extra work
 	for _, pkt := range dictionary.Packets {
-		for i, pt := range pkt.Points {
-			pt.SeqInPacket = i
+		ptr := 0
+		for _, pkt2 := range dictionary.Packets {
+			if pkt.APID == pkt2.APID {
+				for _, pt := range pkt2.Points {
+					pt.BitArrayIndex = ptr
+					ptr++
+				}
+			}
+		}
+	}
+
+	pointCount := 0
+	for _, pkt := range dictionary.Packets {
+		pointCount += len(pkt.Points)
+	}
+
+	// fill point lookup table
+	dictionary.PointIDLookup = make(map[string]*PointInfo, pointCount)
+	for _, pkt := range dictionary.Packets {
+		for _, pt := range pkt.Points {
+			dictionary.PointIDLookup[strings.ToLower(pt.ID)] = pt
 		}
 	}
 
@@ -832,17 +853,17 @@ func propagateConverters(dictionary *TelemetryDictionary) {
 // Accessors
 //
 
-// GetPacketByAPID looks a packet up by its apid.
-// It returns the packet and an ok? boolean
-func (d *TelemetryDictionary) GetPacketByAPID(apid int) (*PacketInfo, bool) {
+// GetPacketsByAPID looks a packet up by its apid.
+// It returns a list of packets and an ok? boolean
+func (d *TelemetryDictionary) GetPacketsByAPID(apid int) (PacketInfoSlice, bool) {
 	if apid < 0 || 2047 < apid {
 		return nil, false
 	}
 	p := d.PacketAPIDLookup[apid]
-	if p == nil {
-		return nil, false
+	if p != nil {
+		return p, true
 	}
-	return p, true
+	return nil, false
 }
 
 // GetPacketByID looks a packet up by its id.
@@ -859,20 +880,22 @@ func (d *TelemetryDictionary) GetPacketByID(id string) (*PacketInfo, bool) {
 // It returns the packet and an ok? boolean
 func (d *TelemetryDictionary) GetPointByID(id string) (*PointInfo, bool) {
 	id = strings.ToLower(id)
-	i := strings.Index(id, ".")
-	if i < 0 {
-		return nil, false
-	}
-	if i >= len(id)-1 {
-		return nil, false
-	}
-	packetID := id[0:i]
-	if pkt, ok := d.GetPacketByID(packetID); ok {
-		if pt, ok := pkt.GetPointByID(id); ok {
-			return pt, ok
-		}
+	if p, ok := d.PointIDLookup[id]; ok {
+		return p, true
 	}
 	return nil, false
+}
+
+// APIDToPointCount returns the total number of points in all packets with the given apid
+func (d *TelemetryDictionary) APIDToPointCount(apid int) int {
+	if packets, ok := d.GetPacketsByAPID(apid); ok {
+		count := 0
+		for _, pkt := range packets {
+			count += len(pkt.Points)
+		}
+		return count
+	}
+	return 0
 }
 
 // GetPointByID returns the telemetry point within a packet
@@ -933,6 +956,15 @@ func (slice PacketInfoSlice) Filter(pred func(p *PacketInfo) bool) PacketInfoSli
 		}
 	}
 	return result
+}
+
+// CountPoints returns the sum of the points in each packet in the list
+func (slice PacketInfoSlice) CountPoints() int {
+	count := 0
+	for _, pkt := range slice {
+		count += len(pkt.Points)
+	}
+	return count
 }
 
 // PointInfoSlice is needed because go is deficient in some ways (this supports sorting)

@@ -251,14 +251,14 @@ func (server *Server) handleSubscriptions() {
 			// Lookup the ids
 
 			//DEBUG
-			fmt.Printf("server: (un)subscribe n=%d, msg.ids=%v\n", len(msg.ids), msg.ids)
+//			fmt.Printf("server: (un)subscribe n=%d, msg.ids=%v\n", len(msg.ids), msg.ids)
 
 			points, badIDs := lookupSubscriptionIds(dict, msg.ids)
 			var apids map[int]bool
 
 			if len(points) > 0 {
 				//DEBUG
-				fmt.Printf("Processing %d subscription ids\n", len(points))
+//				fmt.Printf("Processing %d subscription ids\n", len(points))
 
 				// There are some points to process
 				newSubscriptions := copyClientSubscriptions(msg.client.subscriptions)
@@ -267,35 +267,42 @@ func (server *Server) handleSubscriptions() {
 					apids[pt.APID] = true
 					bits, ok := newSubscriptions[pt.APID]
 					if !ok {
-						pkt, _ := dict.GetPacketByAPID(pt.APID)
-						bits = NewBitArray(len(pkt.Points))
+						count := dict.APIDToPointCount(pt.APID)
+						if count == 0 {
+							fmt.Printf("Internal error: zero point count for apid %d\n", pt.APID)
+						}
+						bits = NewBitArray(count)
 						newSubscriptions[pt.APID] = bits
 					}
 					if msg.isAdd {
-						bits.SetBit(pt.SeqInPacket)
+						bits.SetBit(pt.BitArrayIndex)
 					} else {
-						bits.ClearBit(pt.SeqInPacket)
+						bits.ClearBit(pt.BitArrayIndex)
 					}
 				}
 				msg.client.subscriptions = newSubscriptions
 				server.rebuildApidDispatch <- apids
 
-				//DEBUG
-				fmt.Printf("Reporting subscription counts\n")
-				for apid := range apids {
-					pkt, ok := dict.GetPacketByAPID(apid)
-					if !ok {
-						fmt.Printf("Error in reporting apid=%d\n", apid)
-					}
-					subs := newSubscriptions[apid]
-					count := subs.BitCount()
-					fmt.Printf("apid=%d name=%s BitCount=%d\n", apid, pkt.Name, count)
-				}
-
+//				//DEBUG
+//				fmt.Printf("Reporting subscription counts\n")
+//				for apid := range apids {
+//					pkts, ok := dict.GetPacketsByAPID(apid)
+//					if !ok {
+//						fmt.Printf("Error in reporting apid=%d\n", apid)
+//					}
+//					subs := newSubscriptions[apid]
+//					count := subs.BitCount()
+//					fmt.Printf("apid=%d name=%s BitCount=%d\n", apid, pkts[0].Name, count)
+//				}
+//
+//				//DEBUG
+//				cmdec, _ := dict.GetPointByID("TO_HK.CMDEC")
+//				fmt.Printf("cmdec apid=%d BitArrayIndex=%d\n", cmdec.APID, cmdec.BitArrayIndex)
+//				fmt.Printf("cmdec subscribed? = %v\n", msg.client.subscriptions[cmdec.APID].GetBit(cmdec.BitArrayIndex))
 			}
 
 			//DEBUG
-			fmt.Printf("apids touched: %v", apids)
+//			fmt.Printf("apids touched: %v", apids)
 
 			// Generate a response to the client
 			root := make(map[string]interface{})
@@ -316,11 +323,11 @@ func (server *Server) handleSubscriptions() {
 		case apids := <-server.rebuildApidDispatch:
 
 			for apid := range apids {
-				pkt, ok := dict.GetPacketByAPID(apid)
+				packets, ok := dict.GetPacketsByAPID(apid)
 				if !ok {
 					continue
 				}
-				mask := NewBitArray(len(pkt.Points))
+				mask := NewBitArray(packets.CountPoints())
 				clients := make([]*Client, 20)
 				for _, client := range *server.clients {
 					clientSubscriptions := client.subscriptions[apid]
@@ -334,10 +341,12 @@ func (server *Server) handleSubscriptions() {
 					server.packetDispatchTable[apid] = nil
 				} else {
 					// Build the apidDispatch
-					points := make([]*ccsds.PointInfo, len(pkt.Points))
-					for i, point := range pkt.Points {
-						if mask.GetBit(i) {
-							points = append(points, point)
+					points := make([]*ccsds.PointInfo, 0, packets.CountPoints())
+					for _, packet := range packets {
+						for _, point := range packet.Points {
+							if mask.GetBit(point.BitArrayIndex) {
+								points = append(points, point)
+							}
 						}
 					}
 					// Atomic update
@@ -606,15 +615,18 @@ func (client *Client) handleReportSubscriptions() {
 	sendJSON(ReportSubscriptionsResponse{Response: "report-subscriptions", IDs: client.getSubscriptionIDs()}, client)
 }
 
+// getSubscriptionIDs returns a list of all points subscribed by this client
 func (client *Client) getSubscriptionIDs() []string {
 	ids := make([]string, 0, 256)
 	dict := client.server.Session.Dictionary
 	subscriptions := client.subscriptions
 	for apid, bits := range subscriptions {
-		if pkt, ok := dict.GetPacketByAPID(apid); ok {
-			for i, pt := range pkt.Points {
-				if bits.GetBit(i) {
-					ids = append(ids, pt.ID)
+		if packets, ok := dict.GetPacketsByAPID(apid); ok {
+			for _, packet := range packets {
+				for _, pt := range packet.Points {
+					if bits.GetBit(pt.BitArrayIndex) {
+						ids = append(ids, pt.ID)
+					}
 				}
 			}
 		}
@@ -995,12 +1007,6 @@ type ReportWebsocketConnection struct {
 // Utilities
 ////////////////////////////////////////////////////////////////////////
 
-type byID []*ccsds.PointInfo
-
-func (l byID) Len() int           { return len(l) }
-func (l byID) Swap(i, j int)      { l[i], l[j] = l[j], l[i] }
-func (l byID) Less(i, j int) bool { return (*l[i]).ID < (l[j]).ID }
-
 //
 // Bit Array
 //
@@ -1052,6 +1058,10 @@ func (b BitArray) GetBit(pos int) bool {
 
 // OrInto modifies the receiving BitArray, or'ing its values with the other bit array
 func (b BitArray) OrInto(o BitArray) {
+	//DEBUG
+	if len(b) != len(o) {
+		fmt.Printf("OrInto with different lengths\n")
+	}
 	max := len(b)
 	if len(o) < max {
 		max = len(o)

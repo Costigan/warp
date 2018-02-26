@@ -15,7 +15,7 @@
       "program": "${fileDirname}",
       "env": {},
       //      "args": ["csv", "--verbose", "--dictionary=/home/mshirley/rp.dictionary.json.gz", "--outdir=csv", "~/pktfile.1"],
-      "args": ["web"],
+      "args": ["web", "-v"],
       "showLog": true
     },
     {

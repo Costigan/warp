@@ -18,9 +18,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/Costigan/warp/ccsds"
 	"github.com/spf13/cobra"
@@ -105,11 +107,13 @@ func generateCsvFiles(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	writerMap := writerMap{theMap: map[int]*csvWriter{}, maxOpen: 20}
+	writerMap := writerMap{theMap: make(map[int]writerList), maxOpen: 20}
 	apidErrors := make(map[int]bool)
 
 	channel := make(chan ccsds.Packet, 20)
 	go generatePackets(channel, args)
+
+	startTime := time.Now()
 
 	// This part of the program receives packets from generatePackets()
 	var packetCount int
@@ -117,113 +121,76 @@ func generateCsvFiles(cmd *cobra.Command, args []string) {
 		packetCount++
 		apid := pkt.APID()
 
-		packetInfo := (*dictionary).PacketAPIDLookup[apid]
-		if packetInfo == nil {
+		packets, ok := (*dictionary).GetPacketsByAPID(apid)
+		if !ok {
 			_, ok := apidErrors[apid]
 			if ok {
 				continue
 			}
-			fmt.Printf("APID %d was seen but no matching packet found in the dictionary\n", apid)
+			fmt.Printf("APID %d was seen but no matching packets were found in the dictionary\n", apid)
 			apidErrors[apid] = true
 			continue
 		}
 
-		writer, ok := writerMap.get(apid)
+ 		writers, ok := writerMap.theMap[apid]
 		if !ok {
-			filename := filepath.Join(csvPath, packetInfo.Name+".csv")
-			writer = &csvWriter{theMap: &writerMap, apid: apid, filename: filename, buffer: bytes.NewBuffer(make([]byte, 0, 2048))}
-			writerMap.put(apid, writer)
+			for _, packetInfo := range packets {
+				filename := filepath.Join(csvPath, packetInfo.Name+".csv")
+				writer := &csvWriter{theMap: &writerMap, apid: apid, filename: filename, buffer: bytes.NewBuffer(make([]byte, 0, 2048)), points: packetInfo.Points}
+				writerMap.put(apid, writer)
 
-			// Create or truncate the file
-			if f, err := os.Create(writer.filename); err == nil {
-				f.Close()
-			} else {
-				// TODO: This isn't right yet. It doesn't stop the sender, just the receiver.  The sender will hang when the channel's
-				// buffer fills up
-				fmt.Printf("An error occurred creating %s: %v\n", writer.filename, err)
-				fmt.Println("Aborting ...")
-				writerMap.closeAll()
-				return
+				// Create or truncate the file
+				if f, err := os.Create(writer.filename); err == nil {
+					f.Close()
+				} else {
+					// TODO: This isn't right yet. It doesn't stop the sender, just the receiver.  The sender will hang when the channel's
+					// buffer fills up
+					fmt.Printf("An error occurred creating %s: %v\n", writer.filename, err)
+					fmt.Println("Aborting ...")
+					writerMap.closeAll()
+					return
+				}
+
+				buf := writer.buffer
+				// Write the first line
+				for i, pt := range packetInfo.Points {
+					if i > 0 {
+						fmt.Fprint(buf, ",")
+					}
+					fmt.Fprint(buf, pt.Name)
+				}
+				fmt.Fprintf(buf, "\n")
+				writer.flush()
 			}
+			writers, ok = writerMap.theMap[apid]
+			if !ok {
+				log.Fatalf("Internal error: expected writers to be in the writer map after creating them\n")
+			}
+		}
 
+		for _, writer := range writers {
 			buf := writer.buffer
-			// Write the first line
-			for i, pt := range packetInfo.Points {
+			for i, pt := range writer.points {
+				v, err := pt.GetValue(&pkt)
+				if err != nil {
+					fmt.Printf("    Error extracting %s\n", pt.ID)
+					continue
+				}
 				if i > 0 {
 					fmt.Fprint(buf, ",")
 				}
-				fmt.Fprint(buf, pt.Name)
+				fmt.Fprintf(buf, "%v", v)
 			}
 			fmt.Fprintf(buf, "\n")
-			writer.flush()
+			writer.flushMaybe()
 		}
-
-		buf := writer.buffer
-		for i, pt := range packetInfo.Points {
-			v, err := pt.GetValue(&pkt)
-			if err != nil {
-				fmt.Printf("    Error extracting %s\n", pt.ID)
-				continue
-			}
-			if i > 0 {
-				fmt.Fprint(buf, ",")
-			}
-			fmt.Fprintf(buf, "%v", v)
-		}
-		fmt.Fprintf(buf, "\n")
-		writer.flushMaybe()
 	}
 
 	writerMap.closeAll()
 
-	fmt.Printf("%d packets were processed.\n", packetCount)
-}
-
-//
-// Writer Map
-//
-
-type writerMap struct {
-	theMap  map[int]*csvWriter
-	maxOpen int
-}
-
-func (m *writerMap) get(apid int) (*csvWriter, bool) {
-	v, ok := m.theMap[apid]
-	return v, ok
-}
-
-func (m *writerMap) put(apid int, w *csvWriter) {
-	m.theMap[apid] = w
-}
-
-func (m *writerMap) getLeastRecentlyUsed() *csvWriter {
-	openCount := 0
-	for _, writer := range m.theMap {
-		if writer.file != nil {
-			openCount++
-		}
-	}
-	if openCount < m.maxOpen {
-		return nil
-	}
-
-	// Gotta close one
-	age := math.MaxInt64
-	var oldest *csvWriter
-	for _, writer := range m.theMap {
-		if writer.file != nil && writer.age < age {
-			age = writer.age
-			oldest = writer
-		}
-	}
-	return oldest
-}
-
-func (m *writerMap) closeAll() {
-	for _, writer := range m.theMap {
-		writer.close()
-	}
+	elapsed := (time.Now()).Sub(startTime)
+	msecPerPacket := (float64(elapsed.Nanoseconds())/1000000.0)/float64(packetCount)
+	fmt.Printf("%d packets were processed in %s (%f msec/packet).\n", packetCount, elapsed, msecPerPacket)
 }
 
 //
@@ -238,6 +205,7 @@ type csvWriter struct {
 	age       int
 	threshold int
 	theMap    *writerMap
+	points    []*ccsds.PointInfo
 }
 
 func (writer *csvWriter) open() error {
@@ -286,6 +254,86 @@ func (writer *csvWriter) close() {
 		writer.file = nil
 	}
 }
+
+//
+// Lists of csvWriters
+//
+
+type writerList []*csvWriter
+
+// Add appends a writer to a list of writers
+func (l writerList) Add(w *csvWriter) writerList {
+	if len(l) == 0 {
+		return writerList{w}
+	}
+	for _, old := range l {
+		if old == w {
+			return l
+		}
+	}
+	return append(l, w)
+}
+
+// Map maps a function over a list of writers
+func (l writerList) Map(f func(*csvWriter)) {
+	for _, w := range l {
+		f(w)
+	}
+}
+
+//
+// A map between apids and lists of csvWriters
+//
+
+type writerMap struct {
+	theMap  map[int]writerList
+	maxOpen int
+}
+
+func (m *writerMap) get(apid int) (writerList, bool) {
+	v, ok := m.theMap[apid]
+	return v, ok
+}
+
+func (m *writerMap) put(apid int, w *csvWriter) {
+	m.theMap[apid] = m.theMap[apid].Add(w)
+}
+
+func (m *writerMap) getLeastRecentlyUsed() *csvWriter {
+	openCount := 0
+	for _, writers := range m.theMap {
+		for _, writer := range writers {
+			if writer.file != nil {
+				openCount++
+			}
+		}
+	}
+	if openCount < m.maxOpen {
+		return nil
+	}
+
+	// Gotta close one
+	age := math.MaxInt64
+	var oldest *csvWriter
+	for _, writers := range m.theMap {
+		for _, writer := range writers {
+			if writer.file != nil && writer.age < age {
+				age = writer.age
+				oldest = writer
+			}
+		}
+	}
+	return oldest
+}
+
+func (m *writerMap) closeAll() {
+	for _, writers := range m.theMap {
+		for _, writer := range writers {
+			writer.close()
+		}
+	}
+}
+
 
 //
 // generatePackets

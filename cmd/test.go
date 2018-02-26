@@ -196,10 +196,11 @@ func test5(args []string) {
 	pktfile.Iterate(func(p ccsds.Packet) {
 		apid := p.APID()
 		fmt.Printf("apid=%d len=%d\n", apid, p.Length())
-		packetInfo := (*dictionary).PacketAPIDLookup[apid]
-		if packetInfo == nil {
+		packets, ok := (*dictionary).GetPacketsByAPID(apid)
+		if !ok {
 			return
 		}
+		packetInfo := packets[0]
 		for _, pt := range packetInfo.Points {
 			v, err := pt.GetValue(&p)
 			if err != nil {
@@ -357,7 +358,7 @@ func (worker *websocketWorker) run(wg *sync.WaitGroup) {
 
 		for i := 0; i < workerCycles; i++ {
 			fmt.Printf("worker %d: Sending ping %d...\n", worker.id, i)
-			if !worker.sendJSON(server.PingRequest{Request: "ping", Token: "t1"}) {
+			if !worker.sendJSON(server.GenericRequest{Request: "ping", Token: "t1"}) {
 				fmt.Printf("Error sending ping\n")
 				return
 			}

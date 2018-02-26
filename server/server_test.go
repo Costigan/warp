@@ -25,6 +25,8 @@ const serverWebsocketURL string = "ws://localhost:8000/realtime/"
 const serverDictionaryIDPrefix string = "http://localhost:8000/dictionary/demo/id/"
 const serverDictionaryRoot string = "http://localhost:8000/dictionary/demo/root"
 
+const bypassWithRunningServer bool = false
+
 //
 // Global State
 //
@@ -39,7 +41,7 @@ var shuffledIDs []string
 func TestBitArray(t *testing.T) {
 	b := NewBitArray(100)
 
-	for i:=0;i<100;i++ {
+	for i := 0; i < 100; i++ {
 		b.SetBit(i)
 
 		if !b.GetBit(i) || b.GetBit(i+1) {
@@ -50,7 +52,7 @@ func TestBitArray(t *testing.T) {
 		}
 	}
 
-	for i:=99;i>=0;i-- {
+	for i := 99; i >= 0; i-- {
 		if !b.GetBit(i) {
 			t.Errorf("expected bit %d set, but it wasn't", i)
 		}
@@ -62,10 +64,7 @@ func TestBitArray(t *testing.T) {
 			t.Errorf("At iteration %d the BitCount was %d", i, b.BitCount())
 		}
 	}
-
-
 }
-
 
 func TestNoop(t *testing.T) {
 	withRunningServer(t, serverPort, func(server *Server) {})
@@ -127,28 +126,34 @@ func testSingleSubscriber(t *testing.T, server *Server) {
 }
 
 func withRunningServer(t *testing.T, port int, f func(server *Server)) error {
-	wg := sync.WaitGroup{}
-	wg.Add(1)
-
-	// Start the server
 	server := Server{
 		Host:        "",
 		Port:        serverPort,
 		StaticFiles: "../../../../../projects/warp_data/dist/"}
-	go func() {
-		server.Run()
-		wg.Done()
-	}()
 
-	time.Sleep(3 * time.Second)
+	if bypassWithRunningServer {
+		f(&server)
+		return nil
+	} else {
+		wg := sync.WaitGroup{}
+		wg.Add(1)
 
-	// Run the test in this goroutine
-	f(&server)
+		// Start the server
+		go func() {
+			server.Run()
+			wg.Done()
+		}()
 
-	// Now, we're done
-	server.handleShutdown(nil, nil)
-	wg.Wait()
-	return nil
+		time.Sleep(3 * time.Second)
+
+		// Run the test in this goroutine
+		f(&server)
+
+		// Now, we're done
+		server.handleShutdown(nil, nil)
+		wg.Wait()
+		return nil
+	}
 }
 
 func getWebsocketConnection(t *testing.T, u url.URL) (*websocket.Conn, bool) {
@@ -237,21 +242,21 @@ func loadDictionaryMaybe(t *testing.T) {
 	}
 
 	// Look for duplicate apids
-	apids := make(map[int]int, len(dictionary.Packets))
-	for _, pkt := range dictionary.Packets {
-		apids[pkt.APID] = 1 + apids[pkt.APID]
-	}
-	for apid, count := range apids {
-		if count > 1 {
-			lst := make([]string, 0, count)
-			for _, pkt := range dictionary.Packets {
-				if pkt.APID == apid {
-					lst = append(lst, pkt.ID)
-				}
-			}
-			fmt.Printf("apid=%d count=%d lst=%v\n", apid, count, lst)
-		}
-	}
+//	apids := make(map[int]int, len(dictionary.Packets))
+//	for _, pkt := range dictionary.Packets {
+//		apids[pkt.APID] = 1 + apids[pkt.APID]
+//	}
+//	for apid, count := range apids {
+//		if count > 1 {
+//			lst := make([]string, 0, count)
+//			for _, pkt := range dictionary.Packets {
+//				if pkt.APID == apid {
+//					lst = append(lst, pkt.ID)
+//				}
+//			}
+//			fmt.Printf("apid=%d count=%d lst=%v\n", apid, count, lst)
+//		}
+//	}
 
 }
 
@@ -309,14 +314,14 @@ func (s *Subscriber) TestSubscriptions1() {
 				var toAdd []string
 				toAdd, ids = popStrings(toAddCount, ids)
 
-				s.t.Log(fmt.Sprintf("Subscribing n=%d lst=%v\n", len(toAdd), toAdd))
+//				s.t.Log(fmt.Sprintf("Subscribing n=%d lst=%v\n", len(toAdd), toAdd))
 
 				var to interface{}
 				to = SubscribeRequest{Request: "subscribe", Token: 1, IDs: toAdd}
 				var from1 SubscribeResponse
 				if ok := s.getWebsocketResponse(&to, &from1); ok {
 					if from1.BadIDs != nil && len(from1.BadIDs) != 0 {
-						s.t.Errorf("Subscribed valid ids but got badIDs response.")
+						s.t.Errorf("Subscribed valid ids but got badIDs response: %v", from1.BadIDs)
 					}
 				} else {
 					return
@@ -338,8 +343,8 @@ func (s *Subscriber) TestSubscriptions1() {
 					return
 				}
 
-				s.t.Log(fmt.Sprintf("Reported n=%d lst=%v\n", len(from2.IDs), from2.IDs))
-				s.t.Log(fmt.Sprintf("local    n=%d lst=%v\n", len(subscribed), subscribed.getKeys()))
+//				s.t.Log(fmt.Sprintf("Reported n=%d lst=%v\n", len(from2.IDs), from2.IDs))
+//				s.t.Log(fmt.Sprintf("local    n=%d lst=%v\n", len(subscribed), subscribed.getKeys()))
 
 				// Unsubscribe
 				toRemoveCount := int(float32(len(subscribed)) * maxDeletionsAtOneTime)
