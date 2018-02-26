@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/bits"
 	"net/http"
 	"os"
 	"os/signal"
@@ -149,7 +150,10 @@ func (server *Server) Run() {
 	// Run the server
 	go func() {
 		log.Printf("Listening on %s\n", addr)
-		log.Fatal(h.ListenAndServe())
+		err := h.ListenAndServe()
+		if err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
 	}()
 
 	<-server.StopRequest
@@ -234,6 +238,7 @@ func (server *Server) handleSubscriptions() {
 				}
 			}
 			server.clients = &newClientMap
+
 			// Update all apid subscriptions this client had
 			apids := make(map[int]bool)
 			for apid := range client.subscriptions {
@@ -244,30 +249,53 @@ func (server *Server) handleSubscriptions() {
 		case msg := <-server.updateClientSubscriptionsChan:
 			// Process a subscription request from a client
 			// Lookup the ids
+
+			//DEBUG
+			fmt.Printf("server: (un)subscribe n=%d, msg.ids=%v\n", len(msg.ids), msg.ids)
+
 			points, badIDs := lookupSubscriptionIds(dict, msg.ids)
 			var apids map[int]bool
 
 			if len(points) > 0 {
+				//DEBUG
+				fmt.Printf("Processing %d subscription ids\n", len(points))
+
 				// There are some points to process
 				newSubscriptions := copyClientSubscriptions(msg.client.subscriptions)
 				apids = make(map[int]bool) // keep track of all apids touched
 				for _, pt := range points {
 					apids[pt.APID] = true
-					bits := newSubscriptions[pt.APID]
-					if bits == nil {
+					bits, ok := newSubscriptions[pt.APID]
+					if !ok {
 						pkt, _ := dict.GetPacketByAPID(pt.APID)
-						bits = newbitArray(len(pkt.Points))
+						bits = NewBitArray(len(pkt.Points))
 						newSubscriptions[pt.APID] = bits
 					}
 					if msg.isAdd {
-						bits.setBit(pt.SeqInPacket)
+						bits.SetBit(pt.SeqInPacket)
 					} else {
-						bits.clearBit(pt.SeqInPacket)
+						bits.ClearBit(pt.SeqInPacket)
 					}
 				}
 				msg.client.subscriptions = newSubscriptions
 				server.rebuildApidDispatch <- apids
+
+				//DEBUG
+				fmt.Printf("Reporting subscription counts\n")
+				for apid := range apids {
+					pkt, ok := dict.GetPacketByAPID(apid)
+					if !ok {
+						fmt.Printf("Error in reporting apid=%d\n", apid)
+					}
+					subs := newSubscriptions[apid]
+					count := subs.BitCount()
+					fmt.Printf("apid=%d name=%s BitCount=%d\n", apid, pkt.Name, count)
+				}
+
 			}
+
+			//DEBUG
+			fmt.Printf("apids touched: %v", apids)
 
 			// Generate a response to the client
 			root := make(map[string]interface{})
@@ -292,23 +320,23 @@ func (server *Server) handleSubscriptions() {
 				if !ok {
 					continue
 				}
-				mask := newbitArray(len(pkt.Points))
+				mask := NewBitArray(len(pkt.Points))
 				clients := make([]*Client, 20)
 				for _, client := range *server.clients {
 					clientSubscriptions := client.subscriptions[apid]
-					if clientSubscriptions != nil && !clientSubscriptions.isZero() {
-						mask.orInto(*clientSubscriptions)
+					if clientSubscriptions != nil && !clientSubscriptions.IsZero() {
+						mask.OrInto(*clientSubscriptions)
 						clients = append(clients, client)
 					}
 				}
-				if mask.isZero() {
+				if mask.IsZero() {
 					// No subscriptions for this apid
 					server.packetDispatchTable[apid] = nil
 				} else {
 					// Build the apidDispatch
 					points := make([]*ccsds.PointInfo, len(pkt.Points))
 					for i, point := range pkt.Points {
-						if mask.getBit(i) {
+						if mask.GetBit(i) {
 							points = append(points, point)
 						}
 					}
@@ -320,10 +348,10 @@ func (server *Server) handleSubscriptions() {
 	}
 }
 
-func copyClientSubscriptions(subscriptions map[int]*bitArray) map[int]*bitArray {
-	newSubscriptions := make(map[int]*bitArray, len(subscriptions))
+func copyClientSubscriptions(subscriptions map[int]*BitArray) map[int]*BitArray {
+	newSubscriptions := make(map[int]*BitArray, len(subscriptions))
 	for k, v := range subscriptions {
-		newSubscriptions[k] = v.copy()
+		newSubscriptions[k] = v.Copy()
 	}
 	return newSubscriptions
 }
@@ -413,10 +441,13 @@ func (server *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	server.StopRequest <- &FakeInterrupt{}
 }
 
+// FakeInterrupt is for mocking the server shutdown message
 type FakeInterrupt struct{}
 
+// String is needed to match an interrupt's interface
 func (f *FakeInterrupt) String() string { return "fake interrupt" }
 
+// Signal is needed to match an interrupt's interface
 func (f FakeInterrupt) Signal() {}
 
 ////////////////////////////////////////////////////////////////////////
@@ -428,7 +459,7 @@ type Client struct {
 	server        *Server
 	conn          *websocket.Conn
 	msgChan       chan []byte       // Client receives msgs from channel and sends to the websocket connection
-	subscriptions map[int]*bitArray // immutable
+	subscriptions map[int]*BitArray // immutable
 }
 
 func newClient(server *Server, conn *websocket.Conn) *Client {
@@ -436,7 +467,7 @@ func newClient(server *Server, conn *websocket.Conn) *Client {
 		server:        server,
 		conn:          conn,
 		msgChan:       make(chan []byte, 32),
-		subscriptions: make(map[int]*bitArray),
+		subscriptions: make(map[int]*BitArray),
 	}
 }
 
@@ -490,7 +521,7 @@ func (client *Client) readPump() {
 		var err1, err2 error
 		switch msgVerb {
 		case "ping":
-			var msg PingRequest
+			var msg GenericRequest
 			err1 = json.Unmarshal(p, &msg)
 			if err1 == nil {
 				err2 = client.handlePing(&msg)
@@ -556,8 +587,8 @@ func requestRemoveClient(client *Client) {
 // Message Handlers
 //
 
-func (client *Client) handlePing(r *PingRequest) error {
-	sendJSON(PingResponse{Response: "ping", Token: r.Token}, client)
+func (client *Client) handlePing(r *GenericRequest) error {
+	sendJSON(GenericResponse{Response: "ping", Token: r.Token}, client)
 	return nil
 }
 
@@ -572,7 +603,7 @@ func (client *Client) handleUnsubscribe(r *UnsubscribeRequest) error {
 }
 
 func (client *Client) handleReportSubscriptions() {
-	sendJSON(ReportSubscriptionsResponse{response: "report-subscriptions", ids: client.getSubscriptionIDs()}, client)
+	sendJSON(ReportSubscriptionsResponse{Response: "report-subscriptions", IDs: client.getSubscriptionIDs()}, client)
 }
 
 func (client *Client) getSubscriptionIDs() []string {
@@ -582,7 +613,7 @@ func (client *Client) getSubscriptionIDs() []string {
 	for apid, bits := range subscriptions {
 		if pkt, ok := dict.GetPacketByAPID(apid); ok {
 			for i, pt := range pkt.Points {
-				if bits.getBit(i) {
+				if bits.GetBit(i) {
 					ids = append(ids, pt.ID)
 				}
 			}
@@ -618,14 +649,14 @@ func sendJSON(msg interface{}, clients ...*Client) {
 // Public Websocket Message Templates
 //
 
-// PingRequest is a message template.  Also used as a minimal request
-type PingRequest struct {
+// GenericRequest is a message template.  Also used as a minimal request
+type GenericRequest struct {
 	Request string      `json:"request"`
 	Token   interface{} `json:"token"`
 }
 
-// PingResponse is a message template
-type PingResponse struct {
+// GenericResponse is a message template
+type GenericResponse struct {
 	Response string      `json:"response"`
 	Token    interface{} `json:"token"`
 }
@@ -657,7 +688,7 @@ type UnsubscribeResponse struct {
 	Response string      `json:"response"`
 	Token    interface{} `json:"token"`
 	Status   string      `json:"status"`
-	BadIDs   []string    `json:"bad_ids"`
+	BadIDs   []string    `json:"bad_ids,omitempty"`
 }
 
 // ErrorResponse is a generic message template
@@ -667,9 +698,10 @@ type ErrorResponse struct {
 	Error    string      `json:"error"`
 }
 
+// ReportSubscriptionsResponse is a generic message template
 type ReportSubscriptionsResponse struct {
-	response string   `json:"response"`
-	ids      []string `json:"ids"`
+	Response string   `json:"response"`
+	IDs      []string `json:"ids"`
 }
 
 //
@@ -944,6 +976,7 @@ type PointValuesTemplate struct {
 	Hints  interface{} `json:"hints"`
 }
 
+// ReportTemplate is part of a message template
 type ReportTemplate struct {
 	Version         string                      `json:"version"`
 	Session         Session                     `json:"session"`
@@ -951,6 +984,7 @@ type ReportTemplate struct {
 	ConnectionCount int                         `json:"connection_count"`
 }
 
+// ReportWebsocketConnection is part of a message template
 type ReportWebsocketConnection struct {
 	Address           string   `json:"address"`
 	SubscriptionCount int      `json:"subscription_count"`
@@ -971,18 +1005,21 @@ func (l byID) Less(i, j int) bool { return (*l[i]).ID < (l[j]).ID }
 // Bit Array
 //
 
-type bitArray []uint64
+// BitArray implements a set using a bit array.  It only includes operations needed by the server
+type BitArray []uint64
 
-func newbitArray(count int) *bitArray {
+// NewBitArray returns a new BitArray object
+func NewBitArray(count int) *BitArray {
 	if count < 0 {
-		r := bitArray(make([]uint64, 0))
+		r := BitArray(make([]uint64, 0))
 		return &r
 	}
-	r := bitArray(make([]uint64, count/64))
+	r := BitArray(make([]uint64, 1+count/64))
 	return &r
 }
 
-func (b bitArray) setBit(pos int) error {
+// SetBit sets the bit at pos to 1
+func (b BitArray) SetBit(pos int) error {
 	cell, bitpos := b.getPosition(pos)
 	if cell < 0 || cell >= len(b) {
 		return fmt.Errorf("bit position out-of-range: %d", pos)
@@ -991,7 +1028,8 @@ func (b bitArray) setBit(pos int) error {
 	return nil
 }
 
-func (b bitArray) clearBit(pos int) error {
+// ClearBit sets the bit at pos to 0
+func (b BitArray) ClearBit(pos int) error {
 	cell, bitpos := b.getPosition(pos)
 	if cell < 0 || cell >= len(b) {
 		return fmt.Errorf("bit position out-of-range: %d", pos)
@@ -1000,7 +1038,8 @@ func (b bitArray) clearBit(pos int) error {
 	return nil
 }
 
-func (b bitArray) getBit(pos int) bool {
+// GetBit returns the value of the bit as true/false.  If pos is out-of-range, the returned value is false
+func (b BitArray) GetBit(pos int) bool {
 	cell, bitpos := b.getPosition(pos)
 	if cell < 0 || cell >= len(b) {
 		return false
@@ -1011,7 +1050,8 @@ func (b bitArray) getBit(pos int) bool {
 	return true
 }
 
-func (b bitArray) orInto(o bitArray) {
+// OrInto modifies the receiving BitArray, or'ing its values with the other bit array
+func (b BitArray) OrInto(o BitArray) {
 	max := len(b)
 	if len(o) < max {
 		max = len(o)
@@ -1021,7 +1061,8 @@ func (b bitArray) orInto(o bitArray) {
 	}
 }
 
-func (b bitArray) isZero() bool {
+// IsZero returns true if all bits in this BitArray are 0, else false
+func (b BitArray) IsZero() bool {
 	for i := 0; i < len(b); i++ {
 		if b[i] != 0 {
 			return false
@@ -1030,12 +1071,30 @@ func (b bitArray) isZero() bool {
 	return true
 }
 
-func (b bitArray) copy() *bitArray {
-	r := bitArray(make([]uint64, len(b)))
+// Copy returns a copy of this bit array
+func (b BitArray) Copy() *BitArray {
+	r := BitArray(make([]uint64, len(b)))
 	copy(r, b)
 	return &r
 }
 
-func (b bitArray) getPosition(pos int) (int, uint) {
+func (b BitArray) getPosition(pos int) (int, uint) {
 	return pos / 64, uint(pos) % 64
+}
+
+// BitCount returns the number of bits set
+func (b BitArray) BitCount() int {
+	count := 0
+	for _, l := range b {
+		count += bits.OnesCount64(l)
+	}
+	return count
+}
+
+func (b BitArray) elt(i int) uint64 {
+	return b[i]
+}
+
+func (b BitArray) len() int {
+	return len(b)
 }
