@@ -40,17 +40,16 @@ func (packet Packet) Time42() int64 {
 }
 
 // ReadPacketsCallback reads from a byte stream, identifies CCSDS packet boundaries and passes each packet to a callback
-func ReadPacketsCallback(stream io.Reader, callback func(p Packet)) error {
+func ReadPacketsCallback(stream io.Reader, callback func(p *Packet)) error {
 	return readPacketsInner(stream, make(Packet, 65536+7), callback)
 }
 
 // ReadPacketsChannel reads from a byte stream, identifies CCSDS packet boundaries and passes each packet to a channel
-func ReadPacketsChannel(stream io.Reader, channel chan Packet) error {
-	return readPacketsInner(stream, make(Packet, 65536+7), func(p Packet) { channel <- p })
+func ReadPacketsChannel(stream io.Reader, channel chan *Packet) error {
+	return readPacketsInner(stream, make(Packet, 65536+7), func(p *Packet) { channel <- p })
 }
 
-func readPacketsInner(stream io.Reader, pktbuf Packet, callback func(p Packet)) error {
-	pktbuf = pktbuf[:0]
+func readPacketsInner(stream io.Reader, pktbuf Packet, callback func(p *Packet)) error {
 	pktptr, err, totalBytesRead := 0, error(nil), 0
 	for err == nil {
 		// Read packet header
@@ -92,7 +91,7 @@ func readPacketsInner(stream io.Reader, pktbuf Packet, callback func(p Packet)) 
 		}
 
 		// Do the callback
-		callback(pktbuf)
+		callback(&pktbuf)
 
 		totalBytesRead = totalBytesRead + packetLength
 	}
@@ -113,7 +112,7 @@ type PacketFile struct {
 // Iterate reads a packet file, splits into packets and passes each packet to a callback.
 // This creates and reuses a byte slice for all packets.  If the callback needs to pass the packet
 // to something else, it needs to copy it
-func (source PacketFile) Iterate(callback func(p Packet)) error {
+func (source PacketFile) Iterate(callback func(p *Packet)) error {
 	file, err := os.Open(source.Filename)
 	if err != nil {
 		panic(err)

@@ -16,14 +16,17 @@ package cmd
 
 import (
 	"fmt"
+	"time"
 
+	"github.com/Costigan/warp/ccsds"
+	"github.com/Costigan/warp/server"
 	"github.com/spf13/cobra"
 )
 
 // serverCmd represents the server command
 var serverCmd = &cobra.Command{
 	Use:   "server",
-	Short: "A brief description of your command",
+	Short: "Serve data from a single session telemetry session",
 	Long: `A longer description that spans multiple lines and likely contains examples
 and usage of using your command. For example:
 
@@ -31,20 +34,54 @@ Cobra is a CLI library for Go that empowers applications.
 This application is a tool to generate the needed files
 to quickly create a Cobra application.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("server called")
+		channel := make(chan *ccsds.Packet, 300)
+
+		var serv server.Server
+
+		// Start the server first
+		go func() {
+			serv = server.Server{
+				Host:        "",
+				Port:        8000,
+				PacketChan: channel,
+				StaticFiles: "../../../../../projects/warp_data/dist/"}
+			serv.Run()
+			stopRequest = true
+		}()
+
+		// Wait for it to start
+		time.Sleep(2 * time.Second)
+
+		// Start sending packets
+		generatePackets(channel, args)
 	},
 }
+
+var stopRequest bool = false
+
+var sessionDir string
+var dictionaryPath string
+var inStreamSpec string
+var inFormat string
+
+var inFiles string
+var bitsPerSecond int
 
 func init() {
 	rootCmd.AddCommand(serverCmd)
 
-	// Here you will define your flags and configuration settings.
+	serverCmd.Flags().StringVar(&sessionDir, "session", "", "A session name or a path to a directory containing the session")
+	serverCmd.Flags().StringVar(&dictionaryPath, "dictionary", "", "If provided, overrides the dictionary contained in the session")
+	serverCmd.Flags().StringVar(&inStreamSpec, "in", "", "Where telemetry will come from.  Defaults to files on the command line")
+	serverCmd.Flags().StringVar(&inFormat, "format-in", "packet", "The format of incomming telemetry.  Defaults to raw CCSDS packets")
 
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// serverCmd.PersistentFlags().String("foo", "", "A help for foo")
+	serverCmd.Flags().IntVar(&bitsPerSecond, "bps", 0, "Limit playback to bits per second")
+}
 
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// serverCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+//
+// Generate packets
+//
+
+func generatePackets(channel chan *ccsds.Packet, args []string) {
+	fmt.Printf("args=%v\n", args)
 }

@@ -71,7 +71,7 @@ func init() {
 
 	csvCmd.Flags().StringVarP(&dictionaryFilename, "dictionary", "d", "./dictionary.json.gz", "Path of dictionary file")
 	csvCmd.MarkFlagRequired("dictionary")
-	csvCmd.Flags().StringVarP(&csvPath, "outdir", "", "./csv", "Path of dictionary file")
+	csvCmd.Flags().StringVarP(&csvPath, "outdir", "o", "./csv", "target directory for csv files")
 	csvCmd.MarkFlagRequired("outdir")
 	csvCmd.Flags().BoolVarP(&packetsBool, "packets", "p", true, "use if the files contain ccsds packets")
 	csvCmd.Flags().BoolVarP(&framesBool, "frames", "f", false, "use if the files contain ccsds frames")
@@ -110,17 +110,23 @@ func generateCsvFiles(cmd *cobra.Command, args []string) {
 	writerMap := writerMap{theMap: make(map[int]writerList), maxOpen: 20}
 	apidErrors := make(map[int]bool)
 
-	channel := make(chan ccsds.Packet, 20)
-	go generatePackets(channel, args)
+	channel := make(chan *ccsds.Packet, 20)
+	go PacketFileChannel(args, channel)
 
 	startTime := time.Now()
 
 	// This part of the program receives packets from generatePackets()
 	var packetCount int
 	for pkt := range channel {
+
+		// ignore short packets
+		if len(*pkt) < pkt.Length()+7 {
+			log.Printf("Short packet (apid=%d).  Ignoring...\n", pkt.APID())
+			continue
+		}
+
 		packetCount++
 		apid := pkt.APID()
-
 		packets, ok := (*dictionary).GetPacketsByAPID(apid)
 		if !ok {
 			_, ok := apidErrors[apid]
@@ -132,7 +138,7 @@ func generateCsvFiles(cmd *cobra.Command, args []string) {
 			continue
 		}
 
- 		writers, ok := writerMap.theMap[apid]
+		writers, ok := writerMap.theMap[apid]
 		if !ok {
 			for _, packetInfo := range packets {
 				filename := filepath.Join(csvPath, packetInfo.Name+".csv")
@@ -171,7 +177,11 @@ func generateCsvFiles(cmd *cobra.Command, args []string) {
 		for _, writer := range writers {
 			buf := writer.buffer
 			for i, pt := range writer.points {
-				v, err := pt.GetValue(&pkt)
+
+				//debug
+				//fmt.Printf("pt.ID=%s pt.FieldType=%d pt.ByteOffset=%d pt.ByteSize=%d len(pkt)=%d\n", pt.ID, pt.FieldType, pt.ByteOffset, pt.ByteSize, len(*pkt))
+
+				v, err := pt.GetValue(pkt)
 				if err != nil {
 					fmt.Printf("    Error extracting %s\n", pt.ID)
 					continue
@@ -189,7 +199,7 @@ func generateCsvFiles(cmd *cobra.Command, args []string) {
 	writerMap.closeAll()
 
 	elapsed := (time.Now()).Sub(startTime)
-	msecPerPacket := (float64(elapsed.Nanoseconds())/1000000.0)/float64(packetCount)
+	msecPerPacket := (float64(elapsed.Nanoseconds()) / 1000000.0) / float64(packetCount)
 	fmt.Printf("%d packets were processed in %s (%f msec/packet).\n", packetCount, elapsed, msecPerPacket)
 }
 
@@ -332,34 +342,4 @@ func (m *writerMap) closeAll() {
 			writer.close()
 		}
 	}
-}
-
-
-//
-// generatePackets
-//
-
-func generatePackets(c chan ccsds.Packet, args []string) {
-	for _, basePattern := range args {
-		pat := basePattern
-		if !filepath.IsAbs(pat) {
-			pat = filepath.Join(".", pat)
-		}
-		matches, err := filepath.Glob(pat)
-		if err != nil {
-			fmt.Printf("error expanding file pattern %s: %v\n", pat, err)
-			continue
-		}
-
-		for _, fname := range matches {
-			pktfile := ccsds.PacketFile{Filename: fname}
-			pktfile.Iterate(func(p ccsds.Packet) {
-				len := p.Length() + 7
-				buf := make([]byte, len)
-				copy(buf, p)
-				c <- buf
-			})
-		}
-	}
-	close(c)
 }

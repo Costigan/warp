@@ -2,30 +2,34 @@ Golang Notes
 
 
 
-  warp server					Serves a single session
-       --session-dir=<dir>			location for history & dictionary
-       --dictionary=<dictionary_filename>	override dictionary location
-       --in=<stream_spec>
-       --format-in=
+warp server					Serves a single session
+     --session=<dir_or_name>			location for history & dictionary
+     --dictionary=<dictionary_filename>	override dictionary location
+     --in=<stream_spec>
+     --format-in=
 
-       --files=
-       --bps=<rate>
+     --files=
+     --bps=<rate>
 
-  warp csv
-       --dictionary=<dictionary_filename>
-       --csv=<output_directory>
-       --packets=<packet_files>
-       --frame=<frame_files>
+warp csv
+     --dictionary=<dictionary_filename>
+     --csv=<output_directory>
+     --packets=<packet_files>
+     --frame=<frame_files>
 
-  warp filter					Transforms telemetry data from one format to another
-       --dictionary=<dictionary_filename>	override dictionary location
-       --in=<in_stream_spec>
-       --format-in=frames|packets|itos_bson|packet_json|prechannelized_json|csv
-       --out=<out_stream_spec>
-       --format-out=frames|packets|itos_bson|packet_json|prechannelized_json|pkt_summary|pkt_contents|pkt_hex|pkt_counts
-  
+warp filter					Transforms telemetry data from one format to another
+     --dictionary=<dictionary_filename>	override dictionary location
+     --in=<in_stream_spec>
+     --format-in=frames|packets|anno12_packets|itos_bson|packet_json|prechannelized_json|csv
+     --out=<out_stream_spec>
+     --format-out=frames|packets|itos_bson|packet_json|prechannelized_json|pkt_summary|pkt_contents|pkt_hex|pkt_counts
 
-  warp manager	Manage a set of sessions
+warp describe
+warp packetmon
+warp limitmon
+warp sort
+
+warp manager	Manage a set of sessions
 
 
 

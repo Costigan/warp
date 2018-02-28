@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -32,10 +33,9 @@ const bypassWithRunningServer bool = false
 //
 
 var dictionary *ccsds.TelemetryDictionary
-var shuffledIDs []string
 
 //
-// Tests
+// TestBitArray
 //
 
 func TestBitArray(t *testing.T) {
@@ -66,15 +66,25 @@ func TestBitArray(t *testing.T) {
 	}
 }
 
+//
+// TestNoop (starts and stops a server instance)
+//
+
 func TestNoop(t *testing.T) {
 	withRunningServer(t, serverPort, func(server *Server) {})
 }
+
+//
+// TestSingleServer
+// Starts a server then runs a sequence of tests
+//
 
 func TestSingleServer(t *testing.T) {
 	withRunningServer(t, serverPort, func(server *Server) {
 		testPing(t, server)
 		testDictionaryResponse(t, server)
 		testSingleSubscriber(t, server)
+		testMultipleSubscribers(t, server)
 	})
 }
 
@@ -102,6 +112,8 @@ func testPing(t *testing.T, server *Server) {
 }
 
 func testDictionaryResponse(t *testing.T, server *Server) {
+	loadDictionaryMaybe(t)
+
 	// Get the dictionary
 	var dictResponse DictionaryRootResponse
 	ok := getRESTResponse(t, serverDictionaryRoot, &dictResponse)
@@ -116,13 +128,450 @@ func testDictionaryResponse(t *testing.T, server *Server) {
 }
 
 func testSingleSubscriber(t *testing.T, server *Server) {
+	loadDictionaryMaybe(t)
+
 	u, _ := url.Parse(serverWebsocketURL)
 	c, ok := getWebsocketConnection(t, *u)
 	if !ok {
 		return
 	}
 	sub := &Subscriber{conn: c, server: server, t: t}
-	sub.TestSubscriptions1()
+	sub.TestSubscriptionsSubscribeShuffled(0)
+}
+
+func testMultipleSubscribers(t *testing.T, server *Server) {
+	loadDictionaryMaybe(t)
+
+	const subscriberCount int = 3 // can be run with a larger number
+
+	wg := sync.WaitGroup{}
+	wg.Add(subscriberCount)
+
+	for i := 0; i < subscriberCount; i++ {
+		u, _ := url.Parse(serverWebsocketURL)
+		c, ok := getWebsocketConnection(t, *u)
+		if !ok {
+			t.Fatalf("Failed to establish websocket connection for subscriber # %d", i)
+		}
+		sub := &Subscriber{conn: c, server: server, t: t}
+		go func() {
+			sub.TestSubscriptionsSubscribeShuffled(int64(i))
+			wg.Done()
+		}()
+	}
+	wg.Wait()
+}
+
+//
+// TestDecom1
+//
+
+func TestDecom1(t *testing.T) {
+	loadDictionaryMaybe(t)
+	dict := dictionary
+
+	packetFilename := filepath.Join("../testdata", "pktfile.1")
+	pktfile := ccsds.PacketFile{Filename: packetFilename}
+	count := 0
+	pktfile.Iterate(func(p *ccsds.Packet) {
+		apid := p.APID()
+		packets, ok := dict.GetPacketsByAPID(apid)
+		if !ok {
+			return
+		}
+		count++
+		if count > 2 {
+			return
+		}
+		for _, packet := range packets {
+			msg := DecomPacket(p, packet.Points)
+
+			for i, ch := range msg {
+				if ch == 0 {
+					fmt.Printf("zero at index %d\n", i)
+				}
+			}
+
+			var response DataEventTemplate
+			if err := json.Unmarshal(msg, &response); err == nil {
+				for _, pt := range packet.Points {
+					if v1, err := pt.GetValue(p); err == nil {
+						if m2, ok := response.Values[pt.ID]; ok {
+							if v1 != m2.Value {
+								if !equalCarefully(v1, m2.Value) {
+									t.Errorf("Decom values differ v1=%v v2=%v", v1, m2.Value)
+								}
+							}
+						} else {
+							t.Errorf("No value for %s found in decom event", pt.ID)
+						}
+					} else {
+						t.Errorf("An error occurred while getting %s's value: %v", pt.ID, err)
+					}
+				}
+			} else {
+				t.Errorf("An error occurred unmarshalling a decom event: %v.  The response was %v", err, string(msg))
+			}
+		}
+	})
+}
+
+func equalCarefully(a, b interface{}) bool {
+	switch a1 := a.(type) {
+	case int:
+		switch b1 := b.(type) {
+		case int:
+			return int64(a1) == int64(b1)
+		case int8:
+			return int64(a1) == int64(b1)
+		case int16:
+			return int64(a1) == int64(b1)
+		case int32:
+			return int64(a1) == int64(b1)
+		case int64:
+			return int64(a1) == int64(b1)
+		case uint:
+			return int64(a1) == int64(b1)
+		case byte:
+			return int64(a1) == int64(b1)
+		case uint16:
+			return int64(a1) == int64(b1)
+		case uint32:
+			return int64(a1) == int64(b1)
+		case uint64:
+			return int64(a1) == int64(b1)
+		case float32:
+			return float32(a1) == float32(b1)
+		case float64:
+			return float64(a1) == float64(b1)
+		default:
+			return false
+		}
+	case int8:
+		switch b1 := b.(type) {
+		case int:
+			return int64(a1) == int64(b1)
+		case int8:
+			return int64(a1) == int64(b1)
+		case int16:
+			return int64(a1) == int64(b1)
+		case int32:
+			return int64(a1) == int64(b1)
+		case int64:
+			return int64(a1) == int64(b1)
+		case uint:
+			return int64(a1) == int64(b1)
+		case byte:
+			return int64(a1) == int64(b1)
+		case uint16:
+			return int64(a1) == int64(b1)
+		case uint32:
+			return int64(a1) == int64(b1)
+		case uint64:
+			return int64(a1) == int64(b1)
+		case float32:
+			return float32(a1) == float32(b1)
+		case float64:
+			return float64(a1) == float64(b1)
+		default:
+			return false
+		}
+	case int16:
+		switch b1 := b.(type) {
+		case int:
+			return int64(a1) == int64(b1)
+		case int8:
+			return int64(a1) == int64(b1)
+		case int16:
+			return int64(a1) == int64(b1)
+		case int32:
+			return int64(a1) == int64(b1)
+		case int64:
+			return int64(a1) == int64(b1)
+		case uint:
+			return int64(a1) == int64(b1)
+		case byte:
+			return int64(a1) == int64(b1)
+		case uint16:
+			return int64(a1) == int64(b1)
+		case uint32:
+			return int64(a1) == int64(b1)
+		case uint64:
+			return int64(a1) == int64(b1)
+		case float32:
+			return float32(a1) == float32(b1)
+		case float64:
+			return float64(a1) == float64(b1)
+		default:
+			return false
+		}
+	case int32:
+		switch b1 := b.(type) {
+		case int:
+			return int64(a1) == int64(b1)
+		case int8:
+			return int64(a1) == int64(b1)
+		case int16:
+			return int64(a1) == int64(b1)
+		case int32:
+			return int64(a1) == int64(b1)
+		case int64:
+			return int64(a1) == int64(b1)
+		case uint:
+			return int64(a1) == int64(b1)
+		case byte:
+			return int64(a1) == int64(b1)
+		case uint16:
+			return int64(a1) == int64(b1)
+		case uint32:
+			return int64(a1) == int64(b1)
+		case uint64:
+			return int64(a1) == int64(b1)
+		case float32:
+			return float32(a1) == float32(b1)
+		case float64:
+			return float64(a1) == float64(b1)
+		default:
+			return false
+		}
+	case int64:
+		switch b1 := b.(type) {
+		case int:
+			return int64(a1) == int64(b1)
+		case int8:
+			return int64(a1) == int64(b1)
+		case int16:
+			return int64(a1) == int64(b1)
+		case int32:
+			return int64(a1) == int64(b1)
+		case int64:
+			return int64(a1) == int64(b1)
+		case uint:
+			return int64(a1) == int64(b1)
+		case byte:
+			return int64(a1) == int64(b1)
+		case uint16:
+			return int64(a1) == int64(b1)
+		case uint32:
+			return int64(a1) == int64(b1)
+		case uint64:
+			return int64(a1) == int64(b1) || uint64(a1) == uint64(b1)
+		case float32:
+			return float32(a1) == float32(b1)
+		case float64:
+			return float64(a1) == float64(b1)
+		default:
+			return false
+		}
+	case uint:
+		switch b1 := b.(type) {
+		case int:
+			return int64(a1) == int64(b1)
+		case int8:
+			return int64(a1) == int64(b1)
+		case int16:
+			return int64(a1) == int64(b1)
+		case int32:
+			return int64(a1) == int64(b1)
+		case int64:
+			return int64(a1) == int64(b1)
+		case uint:
+			return int64(a1) == int64(b1)
+		case byte:
+			return int64(a1) == int64(b1)
+		case uint16:
+			return int64(a1) == int64(b1)
+		case uint32:
+			return int64(a1) == int64(b1)
+		case uint64:
+			return uint64(a1) == uint64(b1)
+		case float32:
+			return float32(a1) == float32(b1)
+		case float64:
+			return float64(a1) == float64(b1)
+		default:
+			return false
+		}
+	case uint8:
+		switch b1 := b.(type) {
+		case int:
+			return int64(a1) == int64(b1)
+		case int8:
+			return int64(a1) == int64(b1)
+		case int16:
+			return int64(a1) == int64(b1)
+		case int32:
+			return int64(a1) == int64(b1)
+		case int64:
+			return int64(a1) == int64(b1)
+		case uint:
+			return int64(a1) == int64(b1)
+		case byte:
+			return int64(a1) == int64(b1)
+		case uint16:
+			return int64(a1) == int64(b1)
+		case uint32:
+			return int64(a1) == int64(b1)
+		case uint64:
+			return int64(a1) == int64(b1) || uint64(a1) == uint64(b1)
+		case float32:
+			return float32(a1) == float32(b1)
+		case float64:
+			return float64(a1) == float64(b1)
+		default:
+			return false
+		}
+	case uint16:
+		switch b1 := b.(type) {
+		case int:
+			return int64(a1) == int64(b1)
+		case int8:
+			return int64(a1) == int64(b1)
+		case int16:
+			return int64(a1) == int64(b1)
+		case int32:
+			return int64(a1) == int64(b1)
+		case int64:
+			return int64(a1) == int64(b1)
+		case uint:
+			return int64(a1) == int64(b1)
+		case byte:
+			return int64(a1) == int64(b1)
+		case uint16:
+			return int64(a1) == int64(b1)
+		case uint32:
+			return int64(a1) == int64(b1)
+		case uint64:
+			return int64(a1) == int64(b1) || uint64(a1) == uint64(b1)
+		case float32:
+			return float32(a1) == float32(b1)
+		case float64:
+			return float64(a1) == float64(b1)
+		default:
+			return false
+		}
+	case uint32:
+		switch b1 := b.(type) {
+		case int:
+			return int64(a1) == int64(b1)
+		case int8:
+			return int64(a1) == int64(b1)
+		case int16:
+			return int64(a1) == int64(b1)
+		case int32:
+			return int64(a1) == int64(b1)
+		case int64:
+			return int64(a1) == int64(b1)
+		case uint:
+			return int64(a1) == int64(b1)
+		case byte:
+			return int64(a1) == int64(b1)
+		case uint16:
+			return int64(a1) == int64(b1)
+		case uint32:
+			return int64(a1) == int64(b1)
+		case uint64:
+			return int64(a1) == int64(b1) || uint64(a1) == uint64(b1)
+		case float32:
+			return float32(a1) == float32(b1)
+		case float64:
+			return float64(a1) == float64(b1)
+		default:
+			return false
+		}
+	case uint64:
+		switch b1 := b.(type) {
+		case int:
+			return int64(a1) == int64(b1)
+		case int8:
+			return int64(a1) == int64(b1)
+		case int16:
+			return int64(a1) == int64(b1)
+		case int32:
+			return int64(a1) == int64(b1)
+		case int64:
+			return int64(a1) == int64(b1)
+		case uint:
+			return int64(a1) == int64(b1)
+		case byte:
+			return int64(a1) == int64(b1)
+		case uint16:
+			return int64(a1) == int64(b1)
+		case uint32:
+			return int64(a1) == int64(b1)
+		case float32:
+			return float32(a1) == float32(b1)
+		case float64:
+			return float64(a1) == float64(b1)
+		case uint64:
+			return int64(a1) == int64(b1) || uint64(a1) == uint64(b1)
+		default:
+			return false
+		}
+	case float32:
+		switch b1 := b.(type) {
+		case float32:
+			return float32(a1) == float32(b1)
+		case float64:
+			return float32(a1) == float32(b1)
+		case int:
+			return float32(a1) == float32(b1)
+		case uint:
+			return float32(a1) == float32(b1)
+		case int16:
+			return float32(a1) == float32(b1)
+		case int32:
+			return float32(a1) == float32(b1)
+		case int64:
+			return float32(a1) == float32(b1)
+		case uint8:
+			return float32(a1) == float32(b1)
+		case uint16:
+			return float32(a1) == float32(b1)
+		case uint32:
+			return float32(a1) == float32(b1)
+		case uint64:
+			return float32(a1) == float32(b1)
+		default:
+			return false
+		}
+	case float64:
+		switch b1 := b.(type) {
+		case float32:
+			return float64(a1) == float64(b1)
+		case float64:
+			return float64(a1) == float64(b1)
+		case int:
+			return float64(a1) == float64(b1)
+		case uint:
+			return float64(a1) == float64(b1)
+		case int16:
+			return float64(a1) == float64(b1)
+		case int32:
+			return float64(a1) == float64(b1)
+		case int64:
+			return float64(a1) == float64(b1)
+		case uint8:
+			return float64(a1) == float64(b1)
+		case uint16:
+			return float64(a1) == float64(b1)
+		case uint32:
+			return float64(a1) == float64(b1)
+		case uint64:
+			return float64(a1) == float64(b1)
+		default:
+			return false
+		}
+	case string:
+		switch b1 := b.(type) {
+		case string:
+			return a1 == b1
+		default:
+			return false
+		}
+	default:
+		return false
+	}
 }
 
 func withRunningServer(t *testing.T, port int, f func(server *Server)) error {
@@ -242,34 +691,32 @@ func loadDictionaryMaybe(t *testing.T) {
 	}
 
 	// Look for duplicate apids
-//	apids := make(map[int]int, len(dictionary.Packets))
-//	for _, pkt := range dictionary.Packets {
-//		apids[pkt.APID] = 1 + apids[pkt.APID]
-//	}
-//	for apid, count := range apids {
-//		if count > 1 {
-//			lst := make([]string, 0, count)
-//			for _, pkt := range dictionary.Packets {
-//				if pkt.APID == apid {
-//					lst = append(lst, pkt.ID)
-//				}
-//			}
-//			fmt.Printf("apid=%d count=%d lst=%v\n", apid, count, lst)
-//		}
-//	}
+	//	apids := make(map[int]int, len(dictionary.Packets))
+	//	for _, pkt := range dictionary.Packets {
+	//		apids[pkt.APID] = 1 + apids[pkt.APID]
+	//	}
+	//	for apid, count := range apids {
+	//		if count > 1 {
+	//			lst := make([]string, 0, count)
+	//			for _, pkt := range dictionary.Packets {
+	//				if pkt.APID == apid {
+	//					lst = append(lst, pkt.ID)
+	//				}
+	//			}
+	//			fmt.Printf("apid=%d count=%d lst=%v\n", apid, count, lst)
+	//		}
+	//	}
 
 }
 
-func loadShuffledPoints(t *testing.T) {
+func getShuffledPoints(t *testing.T, r *rand.Rand) []string {
 	loadDictionaryMaybe(t)
-
 	// Get all points and shuffle then randomly (but repeatably due to seed above)
 	allPoints := getAllPointNames(getAllPoints(dictionary))
-	rand.Shuffle(len(allPoints), func(i, j int) {
+	r.Shuffle(len(allPoints), func(i, j int) {
 		allPoints[i], allPoints[j] = allPoints[j], allPoints[i]
 	})
-
-	shuffledIDs = allPoints
+	return allPoints
 }
 
 //
@@ -284,10 +731,11 @@ type Subscriber struct {
 
 type subscriptionMap map[string]bool
 
-func (s *Subscriber) TestSubscriptions1() {
-	rand.Seed(123)
+func (s *Subscriber) TestSubscriptionsSubscribeShuffled(seed int64) {
+	randomSource := rand.NewSource(seed)
+	random := rand.New(randomSource)
 
-	loadShuffledPoints(s.t)
+	shuffledIDs := getShuffledPoints(s.t, random)
 
 	// Test subscription for a bogus point
 	to := SubscribeRequest{Request: "subscribe", Token: 1, IDs: []string{"bogus.point"}}
@@ -306,7 +754,7 @@ func (s *Subscriber) TestSubscriptions1() {
 
 	for i := 0; i < cycles; i++ {
 
-		ids := shuffledIDs
+		ids := shuffledIDs // copy
 
 		for len(ids) > 0 {
 			toAddCount := rand.Intn(maxAddsAtOneTime)
@@ -314,8 +762,10 @@ func (s *Subscriber) TestSubscriptions1() {
 				var toAdd []string
 				toAdd, ids = popStrings(toAddCount, ids)
 
-//				s.t.Log(fmt.Sprintf("Subscribing n=%d lst=%v\n", len(toAdd), toAdd))
+				//				s.t.Log(fmt.Sprintf("Subscribing n=%d lst=%v\n", len(toAdd), toAdd))
+				//				fmt.Printf("%d subscribing count=%d\n", seed, len(toAdd))
 
+				time.Sleep(1 * time.Millisecond)
 				var to interface{}
 				to = SubscribeRequest{Request: "subscribe", Token: 1, IDs: toAdd}
 				var from1 SubscribeResponse
@@ -332,7 +782,10 @@ func (s *Subscriber) TestSubscriptions1() {
 					subscribed[id] = true
 				}
 
+				//				fmt.Printf("%d asking for report\n", seed)
+
 				// Fetch and check report
+				time.Sleep(1 * time.Millisecond)
 				to = GenericRequest{Request: "report-subscriptions", Token: 1}
 				var from2 ReportSubscriptionsResponse
 				if ok := s.getWebsocketResponse(&to, &from2); ok {
@@ -343,8 +796,10 @@ func (s *Subscriber) TestSubscriptions1() {
 					return
 				}
 
-//				s.t.Log(fmt.Sprintf("Reported n=%d lst=%v\n", len(from2.IDs), from2.IDs))
-//				s.t.Log(fmt.Sprintf("local    n=%d lst=%v\n", len(subscribed), subscribed.getKeys()))
+				//				s.t.Log(fmt.Sprintf("Reported n=%d lst=%v\n", len(from2.IDs), from2.IDs))
+				//				s.t.Log(fmt.Sprintf("local    n=%d lst=%v\n", len(subscribed), subscribed.getKeys()))
+
+				//				fmt.Printf("%d removing locals\n", seed)
 
 				// Unsubscribe
 				toRemoveCount := int(float32(len(subscribed)) * maxDeletionsAtOneTime)
@@ -367,7 +822,10 @@ func (s *Subscriber) TestSubscriptions1() {
 					delete(subscribed, id)
 				}
 
+				//				fmt.Printf("%d unsubscribing count=%d\n", seed, len(toRemove))
+
 				// Unsubscribe
+				time.Sleep(1 * time.Millisecond)
 				to = SubscribeRequest{Request: "unsubscribe", Token: 1, IDs: toRemove}
 				var from3 SubscribeResponse
 				if ok := s.getWebsocketResponse(&to, &from3); ok {
@@ -378,7 +836,10 @@ func (s *Subscriber) TestSubscriptions1() {
 					return
 				}
 
+				//				fmt.Printf("%d fetching report after unsubscribe\n", seed)
+
 				// Fetch and check report
+				time.Sleep(1 * time.Millisecond)
 				to = GenericRequest{Request: "report-subscriptions", Token: 1}
 				var from4 ReportSubscriptionsResponse
 				if ok := s.getWebsocketResponse(&to, &from4); ok {
@@ -388,6 +849,8 @@ func (s *Subscriber) TestSubscriptions1() {
 				} else {
 					return
 				}
+
+				//				fmt.Printf("%d after report fetch\n", seed)
 			}
 		}
 	}

@@ -38,7 +38,8 @@ var testCmd = &cobra.Command{
 	Short: "Used to exercise program features",
 	Long:  `What this command does changes over time as new functionality is implemented and tested.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		test6(cmd, args)
+		test5(args)
+//		test6(cmd, args)
 	},
 }
 
@@ -95,7 +96,7 @@ func test1(args []string) {
 	}
 	fmt.Println("filename=", filename)
 	pktfile := ccsds.PacketFile{Filename: filename}
-	pktfile.Iterate(func(p ccsds.Packet) {
+	pktfile.Iterate(func(p *ccsds.Packet) {
 		fmt.Printf("apid=%d len=%d\n", p.APID(), p.Length())
 	})
 }
@@ -190,19 +191,20 @@ func test5(args []string) {
 	}
 	fmt.Printf("There are %d packets in %s", len((*dictionary).Packets), dictionaryFilename)
 
-	packetFilename := "C:/RP/data/test_data/pktfile.1"
+	packetFilename := "/home/mshirley/pktfile.1"
 	fmt.Printf("Reading packet filename %s\n", packetFilename)
 	pktfile := ccsds.PacketFile{Filename: packetFilename}
-	pktfile.Iterate(func(p ccsds.Packet) {
+	pktfile.Iterate(func(p *ccsds.Packet) {
 		apid := p.APID()
 		fmt.Printf("apid=%d len=%d\n", apid, p.Length())
+
 		packets, ok := (*dictionary).GetPacketsByAPID(apid)
 		if !ok {
 			return
 		}
 		packetInfo := packets[0]
 		for _, pt := range packetInfo.Points {
-			v, err := pt.GetValue(&p)
+			v, err := pt.GetValue(p)
 			if err != nil {
 				fmt.Printf("    Error extracting %s\n", pt.ID)
 				continue

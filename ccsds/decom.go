@@ -39,6 +39,7 @@ type PacketInfo struct {
 	Name          string
 	Points        PointInfoSlice        // []*PointInfo
 	PointMap      map[string]*PointInfo // ids are lowercase'd
+	LastByte      int
 }
 
 // PointInfo describes a single telemetry point, providing the information needed to extract its value from a binary packet
@@ -58,6 +59,10 @@ type PointInfo struct {
 	Conversion         IConversion
 
 	BitArrayIndex int `json:"-"`
+}
+
+func (point *PointInfo) LastByteOffset() int {
+	return int(point.ByteOffset + point.ByteSize - 1)
 }
 
 //
@@ -534,6 +539,9 @@ func init() {
 		offset := int(point.ByteOffset)
 		packetByteCount := pkt.Length() + 7
 		count := min(int(point.ByteSize), packetByteCount-offset)
+		if count<1 {
+			return "", nil
+		}
 		for i := 0; i < count; i++ {
 			if pkt[i+offset] == 0 {
 				count = i
@@ -810,6 +818,18 @@ func LoadDictionary(filename string) (*TelemetryDictionary, error) {
 		for _, pt := range pkt.Points {
 			dictionary.PointIDLookup[strings.ToLower(pt.ID)] = pt
 		}
+	}
+
+	// Calculate the last bytes
+	for _, pkt := range dictionary.Packets {
+		last := 0
+		for _, pt := range pkt.Points {
+			lb := pt.LastByteOffset()
+			if lb > last {
+				last = lb
+			}
+		}
+		pkt.LastByte = last
 	}
 
 	return &dictionary, nil

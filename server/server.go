@@ -15,6 +15,8 @@
 package server
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -56,8 +58,7 @@ type Server struct {
 	packetDispatchTable [2048]*apidDispatch          // values in slots are immutable, nil means no subscriptions, updated by handleSubscriptions()
 
 	// Channels
-	packetChan chan ccsds.Packet // incoming packets
-
+	PacketChan                    chan *ccsds.Packet // incoming packets
 	addClientChan                 chan *Client
 	removeClientChan              chan *Client
 	updateClientSubscriptionsChan chan *updateClientSubscriptionsMsg // add/remove subscriptions
@@ -90,11 +91,14 @@ func (server *Server) Run() {
 
 	// Initialize channels
 	server.clients = &map[*websocket.Conn]*Client{}
-	server.packetChan = make(chan ccsds.Packet, 300)
 	server.addClientChan = make(chan *Client, 20)
 	server.removeClientChan = make(chan *Client, 20)
-	server.updateClientSubscriptionsChan = make(chan *updateClientSubscriptionsMsg, 20)
-	server.rebuildApidDispatch = make(chan map[int]bool, 20)
+	server.updateClientSubscriptionsChan = make(chan *updateClientSubscriptionsMsg, 200)
+	server.rebuildApidDispatch = make(chan map[int]bool, 200) // 100
+
+	if server.PacketChan == nil {
+		server.PacketChan = make(chan *ccsds.Packet, 300) // 1000
+	}
 
 	// For now, build in the session name
 	server.Session = &Session{Name: "demo"}
@@ -171,7 +175,6 @@ var upgrader = websocket.Upgrader{
 }
 
 func (server *Server) serveWS(w http.ResponseWriter, req *http.Request) {
-	//	fmt.Println("in serveWS")
 	conn, err := upgrader.Upgrade(w, req, nil)
 	if err != nil {
 		log.Println(err)
@@ -251,14 +254,19 @@ func (server *Server) handleSubscriptions() {
 			// Lookup the ids
 
 			//DEBUG
-//			fmt.Printf("server: (un)subscribe n=%d, msg.ids=%v\n", len(msg.ids), msg.ids)
+			//			fmt.Printf("server: (un)subscribe n=%d, msg.ids=%v\n", len(msg.ids), msg.ids)
+			//			if msg.isAdd {
+			//				fmt.Printf("server:   subscribe n=%d\n", len(msg.ids))
+			//			} else {
+			//				fmt.Printf("server: unsubscribe n=%d\n", len(msg.ids))
+			//			}
 
 			points, badIDs := lookupSubscriptionIds(dict, msg.ids)
 			var apids map[int]bool
 
 			if len(points) > 0 {
 				//DEBUG
-//				fmt.Printf("Processing %d subscription ids\n", len(points))
+				//				fmt.Printf("Processing %d subscription ids\n", len(points))
 
 				// There are some points to process
 				newSubscriptions := copyClientSubscriptions(msg.client.subscriptions)
@@ -280,29 +288,32 @@ func (server *Server) handleSubscriptions() {
 						bits.ClearBit(pt.BitArrayIndex)
 					}
 				}
+				//				fmt.Printf("Updating client subscriptions and sending rebuild\n")
 				msg.client.subscriptions = newSubscriptions
 				server.rebuildApidDispatch <- apids
 
-//				//DEBUG
-//				fmt.Printf("Reporting subscription counts\n")
-//				for apid := range apids {
-//					pkts, ok := dict.GetPacketsByAPID(apid)
-//					if !ok {
-//						fmt.Printf("Error in reporting apid=%d\n", apid)
-//					}
-//					subs := newSubscriptions[apid]
-//					count := subs.BitCount()
-//					fmt.Printf("apid=%d name=%s BitCount=%d\n", apid, pkts[0].Name, count)
-//				}
-//
-//				//DEBUG
-//				cmdec, _ := dict.GetPointByID("TO_HK.CMDEC")
-//				fmt.Printf("cmdec apid=%d BitArrayIndex=%d\n", cmdec.APID, cmdec.BitArrayIndex)
-//				fmt.Printf("cmdec subscribed? = %v\n", msg.client.subscriptions[cmdec.APID].GetBit(cmdec.BitArrayIndex))
+				//				//DEBUG
+				//				fmt.Printf("Reporting subscription counts\n")
+				//				for apid := range apids {
+				//					pkts, ok := dict.GetPacketsByAPID(apid)
+				//					if !ok {
+				//						fmt.Printf("Error in reporting apid=%d\n", apid)
+				//					}
+				//					subs := newSubscriptions[apid]
+				//					count := subs.BitCount()
+				//					fmt.Printf("apid=%d name=%s BitCount=%d\n", apid, pkts[0].Name, count)
+				//				}
+				//
+				//				//DEBUG
+				//				cmdec, _ := dict.GetPointByID("TO_HK.CMDEC")
+				//				fmt.Printf("cmdec apid=%d BitArrayIndex=%d\n", cmdec.APID, cmdec.BitArrayIndex)
+				//				fmt.Printf("cmdec subscribed? = %v\n", msg.client.subscriptions[cmdec.APID].GetBit(cmdec.BitArrayIndex))
 			}
 
 			//DEBUG
-//			fmt.Printf("apids touched: %v", apids)
+			//			fmt.Printf("apids touched: %v", apids)
+
+			//			fmt.Printf("Generating response to (un)subscribe n=%d\n", len(msg.ids))
 
 			// Generate a response to the client
 			root := make(map[string]interface{})
@@ -318,6 +329,7 @@ func (server *Server) handleSubscriptions() {
 			} else {
 				root["status"] = "success"
 			}
+			//			fmt.Printf("Sending response n=%d\n", len(msg.ids))
 			sendJSON(root, msg.client)
 
 		case apids := <-server.rebuildApidDispatch:
@@ -402,17 +414,60 @@ type apidDispatch struct {
 // Realtime Packet Decomm
 //
 
+// InsertPacket allows packets to be introduced without sending them over the network
+func (server *Server) InsertPacket(pkt *ccsds.Packet) {
+	server.PacketChan <- pkt
+}
+
 func (server *Server) packetPump() {
-	packetChan := server.packetChan
+	packetChan := server.PacketChan
 	for {
 		pkt := <-packetChan
-		msg := decomPacket(pkt, server.packetDispatchTable) // Refetch the table every time
-		fmt.Println(string(msg))
+		apid := pkt.APID()
+		dispatch := server.packetDispatchTable[apid] // Refetch the table every time
+		if dispatch == nil {
+			continue
+		}
+		msg := DecomPacket(pkt, dispatch.points)
+		send(msg, dispatch.clients...)
 	}
 }
 
-func decomPacket(pkt ccsds.Packet, dispatchTable [2048]*apidDispatch) []byte {
-	return make([]byte, 0)
+// DecomPacket takes a packet and a list of points, extracts the point values and formats them as json
+func DecomPacket(pkt *ccsds.Packet, points []*ccsds.PointInfo) []byte {
+	// Allocate the output buffer
+	buf := bytes.NewBuffer(make([]byte, 0, 512))
+	w := bufio.NewWriter(buf)
+
+	// Response
+	fmt.Fprintf(w, `{"response":"data_event","realtime":"true","timestamp":%d,"apid":%d,"values":{"`, pkt.Time42(), pkt.APID())
+	count := len(points)
+	for i := 0; i < count; i++ {
+		pt := points[i]
+		if i > 0 {
+			w.WriteString(`,"`)
+		}
+		w.WriteString(pt.ID)
+		w.WriteString(`":{"value":`)
+
+		v, err := pt.GetValue(pkt)
+		if err != nil {
+			v = "*** error in decom ***"
+		}
+		switch v1 := v.(type) {
+		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+			fmt.Fprintf(w, "%d}", v1)
+		case float32, float64:
+			fmt.Fprintf(w, "%f}", v1)
+		case string:
+			w.WriteString(`"`)
+			w.WriteString(v1)
+			w.WriteString(`"}`)
+		}
+	}
+	w.WriteString(`}}`)
+	w.Flush()
+	return buf.Bytes()
 }
 
 //
@@ -495,7 +550,7 @@ func (client *Client) readPump() {
 			oldConn := client.conn
 			requestRemoveClient(client)
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived, websocket.CloseAbnormalClosure) {
-				log.Printf("websocket(%s) closed unexpectedly: %v", client.conn.RemoteAddr().String(), err.Error())
+				log.Printf("websocket(%s) closed unexpectedly: %v", oldConn.RemoteAddr().String(), err.Error())
 			} else {
 				log.Printf("websocket: %s closed", oldConn.RemoteAddr().String())
 			}
@@ -716,6 +771,18 @@ type ReportSubscriptionsResponse struct {
 	IDs      []string `json:"ids"`
 }
 
+type DataEventTemplate struct {
+	Response  string                            `json:"response"`
+	Realtime  string                            `json:"realtime"`
+	Timestamp int64                             `json:"timestamp"`
+	APID      int                               `json:"apid"`
+	Values    map[string]DataEventValueTemplate `json:"values"`
+}
+
+type DataEventValueTemplate struct {
+	Value interface{} `json:"value"`
+}
+
 //
 // Public REST Message Templates
 //
@@ -763,8 +830,8 @@ func (session *Session) loadDictionary() error {
 	}
 	session.Dictionary = dictionary
 	session.DictionaryRoot = makeDictionaryRoot(dictionary)
-	fmt.Printf("There are %d packets in %s\r\n", len(dictionary.Packets), filename)
-	fmt.Printf("There are %d packets in the root\r\n", len(session.DictionaryRoot.Packets))
+	//	fmt.Printf("There are %d packets in %s\r\n", len(dictionary.Packets), filename)
+	//	fmt.Printf("There are %d packets in the root\r\n", len(session.DictionaryRoot.Packets))
 	return nil
 }
 
