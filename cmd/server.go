@@ -15,7 +15,8 @@
 package cmd
 
 import (
-	"fmt"
+	"log"
+	"path/filepath"
 	"time"
 
 	"github.com/Costigan/warp/ccsds"
@@ -83,5 +84,53 @@ func init() {
 //
 
 func generatePackets(channel chan *ccsds.Packet, args []string) {
-	fmt.Printf("args=%v\n", args)
+	packetFileCallbackBPSStopRequest(&stopRequest, bitsPerSecond, args, func(p *ccsds.Packet) {
+		channel<-p
+	})
+}
+
+func packetFileCallbackBPSStopRequest(stop *bool, bps int, args []string, callback func(p *ccsds.Packet)) {
+	var totalBits int64
+	startTime := time.Now()
+	targetTime := startTime
+	for _, basePattern := range args {
+		pat := basePattern
+		if !filepath.IsAbs(pat) {
+			pat = filepath.Join(".", pat)
+		}
+		matches, err := filepath.Glob(pat)
+		if err != nil {
+			log.Printf("error expanding file pattern %s: %v\n", pat, err)
+			continue
+		}
+
+		for _, fname := range matches {
+			pktfile := ccsds.PacketFile{Filename: fname}
+			pktfile.Iterate(func(p *ccsds.Packet) {
+
+				if *stop {
+					return
+				}
+
+				len := p.Length() + 7
+				buf := make([]byte, len)
+				copy(buf, *p)
+
+				// Insert the governer
+				sleepDelta := targetTime.Sub(time.Now())
+				//fmt.Printf("targetTime=%v sleepDelta=%d\n", targetTime, int64(sleepDelta))
+				time.Sleep(sleepDelta)
+				totalBits += 8 * int64(p.Length() + 7)
+				targetSecondsDelay := float64(totalBits) / float64(bps)
+				targetNanoSecondsDelay := int64(targetSecondsDelay * float64(time.Second))
+				targetTime = startTime.Add(time.Duration(targetNanoSecondsDelay))
+
+				if 816 == p.APID() {
+					log.Printf("Sending EPSIO_BIT\n")
+				}
+
+				callback(p)
+			})
+		}
+	}
 }

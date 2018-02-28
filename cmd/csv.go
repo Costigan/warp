@@ -111,7 +111,7 @@ func generateCsvFiles(cmd *cobra.Command, args []string) {
 	apidErrors := make(map[int]bool)
 
 	channel := make(chan *ccsds.Packet, 20)
-	go PacketFileChannel(args, channel)
+	go StreamPacketFiles(args, channel)
 
 	startTime := time.Now()
 

@@ -15,8 +15,9 @@
 package cmd
 
 import (
-	"fmt"
+	"os"
 
+	"github.com/Costigan/warp/ccsds"
 	"github.com/spf13/cobra"
 )
 
@@ -31,7 +32,7 @@ Cobra is a CLI library for Go that empowers applications.
 This application is a tool to generate the needed files
 to quickly create a Cobra application.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("filter called")
+		filter1(args)
 	},
 }
 
@@ -47,4 +48,13 @@ func init() {
 	// Cobra supports local flags which will only run when this command
 	// is called directly, e.g.:
 	// filterCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+}
+
+func filter1(args []string) {
+	MapOverPacketFiles(args, func(p *ccsds.Packet) {
+		if p.APID() == 816 {
+			pkt := (*p)[0:min(p.Length()+7, len(*p))]
+			os.Stdout.Write(pkt)
+		}
+	})
 }

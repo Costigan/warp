@@ -362,7 +362,7 @@ func (server *Server) handleSubscriptions() {
 						}
 					}
 					// Atomic update
-					server.packetDispatchTable[apid] = &apidDispatch{clients: clients, points: points}
+					server.packetDispatchTable[apid] = &apidDispatch{Clients: clients, Points: points}
 				}
 			}
 		}
@@ -406,8 +406,8 @@ func lookupSubscriptionIds(dict *ccsds.TelemetryDictionary, ids []string) ([]*cc
 // entries in the dispatch table can be changed as atomic operations
 
 type apidDispatch struct {
-	clients []*Client
-	points  []*ccsds.PointInfo
+	Clients []*Client          `json:"clients"`
+	Points  []*ccsds.PointInfo `json:"points"`
 }
 
 //
@@ -424,12 +424,18 @@ func (server *Server) packetPump() {
 	for {
 		pkt := <-packetChan
 		apid := pkt.APID()
+		//DEBUG
+		if apid == 816 {
+			log.Printf("Server: dispatching EPSIO_BIT\n")
+		}
 		dispatch := server.packetDispatchTable[apid] // Refetch the table every time
 		if dispatch == nil {
 			continue
 		}
-		msg := DecomPacket(pkt, dispatch.points)
-		send(msg, dispatch.clients...)
+		msg := DecomPacket(pkt, dispatch.Points)
+		//DEBUG
+//		log.Printf("sending msg to %d clients\n", len(dispatch.clients))
+		send(msg, dispatch.Clients...)
 	}
 }
 
@@ -492,7 +498,14 @@ func (server *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 		connections = append(connections, ReportWebsocketConnection{Address: conn.RemoteAddr().String(), SubscriptionCount: len(ids), IDs: ids})
 	}
 
-	response := ReportTemplate{Version: "0.1", Session: *server.Session, Connections: connections, ConnectionCount: len(connections)}
+	dispatchSummary := make(map[int]*apidDispatch)
+	for i, d := range server.packetDispatchTable {
+		if d != nil {
+			dispatchSummary[i] = d
+		}
+	}
+
+	response := ReportTemplate{Version: "0.1", Session: *server.Session, Connections: connections, ConnectionCount: len(connections), DispatchTable: dispatchSummary}
 	prepareHeader(w, r)
 	json.NewEncoder(w).Encode(response)
 }
@@ -610,6 +623,7 @@ func (client *Client) readPump() {
 
 		if err1 != nil {
 			log.Printf("websocket(%s) error parsing %s request: %v", client.conn.RemoteAddr().String(), msgVerb, err1)
+			log.Printf("websocket(%s) the request was %v", client.conn.RemoteAddr().String(), msg)
 			sendJSON(ErrorResponse{Response: msgVerb, Token: msgToken, Error: err1.Error()}, client)
 		} else if err2 != nil {
 			log.Printf("websocket(%s) error processing %s request: %v", client.conn.RemoteAddr().String(), msgVerb, err2)
@@ -1061,6 +1075,7 @@ type ReportTemplate struct {
 	Session         Session                     `json:"session"`
 	Connections     []ReportWebsocketConnection `json:"connections"`
 	ConnectionCount int                         `json:"connection_count"`
+	DispatchTable   map[int]*apidDispatch       `json:"dispatch_table"`
 }
 
 // ReportWebsocketConnection is part of a message template

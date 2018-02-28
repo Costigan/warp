@@ -23,13 +23,8 @@ import (
 	"github.com/Costigan/warp/ccsds"
 )
 
-//
-// generatePackets
-//
-
-// PacketFileCallback generates a stream of packets and sends them using a callback
-func PacketFileCallback(args []string, callback func(p *ccsds.Packet)) {
-	for _, basePattern := range args {
+func MapOverFiles(patterns []string, callback func(filename string)) {
+	for _, basePattern := range patterns {
 		pat := basePattern
 		if pat[:2] == "~/" {
 			usr, _ := user.Current()
@@ -44,67 +39,84 @@ func PacketFileCallback(args []string, callback func(p *ccsds.Packet)) {
 			log.Printf("error expanding file pattern %s: %v\n", pat, err)
 			continue
 		}
-
 		for _, fname := range matches {
-			pktfile := ccsds.PacketFile{Filename: fname}
-			pktfile.Iterate(func(p *ccsds.Packet) {
-				len := p.Length() + 7
-				buf := make([]byte, len)
-				copy(buf, *p)
-				callback(p)
-			})
+			callback(fname)
 		}
 	}
 }
 
-// PacketFileChannel generates a stream of packets and sends them to a channel
-func PacketFileChannel(args []string, channel chan *ccsds.Packet) {
-	PacketFileCallback(args, func(p *ccsds.Packet) {
+//
+// generatePackets
+//
+
+// MapOverPacketFiles generates a stream of packets and sends them using a callback
+func MapOverPacketFiles(args []string, callback func(p *ccsds.Packet)) {
+	MapOverFiles(args, func (fname string) {
+		pktfile := ccsds.PacketFile{Filename: fname}
+		pktfile.Iterate(func(p *ccsds.Packet) {
+			len := p.Length() + 7
+			buf := make([]byte, len)
+			copy(buf, *p)
+			callback(p)
+		})
+	})
+}
+
+// StreamPacketFiles generates a stream of packets and sends them to a channel
+func StreamPacketFiles(args []string, channel chan *ccsds.Packet) {
+	MapOverPacketFiles(args, func(p *ccsds.Packet) {
 		channel <- p
 	})
 	close(channel)
 }
 
-// PacketFileCallbackBPS generates a stream of packets and sends them via a callback, slowing the calls
+// MapOverPacketFilesBPS generates a stream of packets and sends them via a callback, slowing the calls
 // to a given bits-per-second
-func PacketFileCallbackBPS(bps int, args []string, callback func(p *ccsds.Packet)) {
+func MapOverPacketFilesBPS(bps int, args []string, callback func(p *ccsds.Packet)) {
 	var totalBits int64
 	startTime := time.Now()
 	targetTime := startTime
-	for _, basePattern := range args {
-		pat := basePattern
-		if !filepath.IsAbs(pat) {
-			pat = filepath.Join(".", pat)
-		}
-		matches, err := filepath.Glob(pat)
-		if err != nil {
-			log.Printf("error expanding file pattern %s: %v\n", pat, err)
-			continue
-		}
+	MapOverFiles(args, func (fname string) {
+		pktfile := ccsds.PacketFile{Filename: fname}
+		pktfile.Iterate(func(p *ccsds.Packet) {
+			len := p.Length() + 7
+			buf := make([]byte, len)
+			copy(buf, *p)
 
-		for _, fname := range matches {
-			pktfile := ccsds.PacketFile{Filename: fname}
-			pktfile.Iterate(func(p *ccsds.Packet) {
-				len := p.Length() + 7
-				buf := make([]byte, len)
-				copy(buf, *p)
+			// Limit the playback rate
+			sleepDelta := targetTime.Sub(time.Now())
+			time.Sleep(sleepDelta)
+			totalBits += 8 * int64(p.Length() + 7)
+			targetSecondsDelay := float64(totalBits) / float64(bps)
+			targetNanoSecondsDelay := int64(targetSecondsDelay * float64(time.Second))
+			targetTime = startTime.Add(time.Duration(targetNanoSecondsDelay))
 
-				// Insert the governer
-				time.Sleep(targetTime.Sub(time.Now()))
-				totalBits += int64(p.Length() + 7)
-				targetTime = startTime.Add(time.Duration(float64(totalBits) / float64(bps)))
-
-				callback(p)
-			})
-		}
-	}
+			callback(p)
+		})
+	})
 }
 
-// PacketFileChannelBPS generates a stream of packets and sends them to a stream, slowing the calls
+// StreamPacketFilesBPS generates a stream of packets and sends them to a stream, slowing the calls
 // to a given bits-per-second
-func PacketFileChannelBPS(bps int, args []string, channel chan *ccsds.Packet) {
-	PacketFileCallbackBPS(bps, args, func(p *ccsds.Packet) {
+func StreamPacketFilesBPS(bps int, args []string, channel chan *ccsds.Packet) {
+	MapOverPacketFilesBPS(bps, args, func(p *ccsds.Packet) {
 		channel <- p
 	})
 	close(channel)
+}
+
+// Sigh
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

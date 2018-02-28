@@ -38,8 +38,8 @@ var testCmd = &cobra.Command{
 	Short: "Used to exercise program features",
 	Long:  `What this command does changes over time as new functionality is implemented and tested.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		test5(args)
-//		test6(cmd, args)
+//		test5(args)
+		test6(cmd, args)
 	},
 }
 
@@ -49,6 +49,7 @@ var doTestWebsocketDecom bool
 var doTestWebsocketHistory bool
 var doTestRestHistory bool
 var doTestRestDictionary bool
+var doTimedPlaybackTest bool
 
 var workerCount int
 var workerCycles int
@@ -57,6 +58,8 @@ var serverHost = "localhost"
 var serverPort = 8000
 
 var sessionName = "demo"
+
+// bitsPerSecond is already declared in cmd/server.go
 
 func init() {
 	rootCmd.AddCommand(testCmd)
@@ -79,12 +82,14 @@ func init() {
 	testCmd.Flags().BoolVar(&doTestWebsocketHistory, "ws-history", false, "Test websocket history")
 	testCmd.Flags().BoolVar(&doTestRestHistory, "rest-history", false, "Test REST history endpoints")
 	testCmd.Flags().BoolVar(&doTestRestDictionary, "rest-dictionary", false, "Test REST dictionary endpoints")
+	testCmd.Flags().BoolVar(&doTimedPlaybackTest, "timed-playback", false, "Read back a file at a given bps and print the total time")
 
 	testCmd.Flags().IntVar(&workerCount, "workers", 1, "Number of workers testing in parallel")
 	testCmd.Flags().IntVar(&workerCycles, "cycles", 1, "Number of cycles of testing each worker should do (details depend on the test)")
 
 	testCmd.Flags().StringVar(&serverHost, "host", "localhost", "Hostname where a warp server will be running")
 	testCmd.Flags().IntVar(&serverPort, "port", 8000, "Port where a warp server will be running")
+	testCmd.Flags().IntVar(&bitsPerSecond, "bps", 100000, "Bits-per-second for the playback test")
 }
 
 func test1(args []string) {
@@ -233,6 +238,9 @@ func test6(cmd *cobra.Command, args []string) {
 	}
 	if doTestWebsocketDecom || doTestWebsocketSubscriptions {
 		testWebsockets()
+	}
+	if doTimedPlaybackTest {
+		timedPlaybackTest(args)
 	}
 }
 
@@ -391,4 +399,19 @@ func (worker *websocketWorker) send(msg []byte) bool {
 		return false
 	}
 	return true
+}
+
+//
+// Timed playback test
+//
+
+func timedPlaybackTest(args []string) {
+	start := time.Now()
+	var totalBits int64
+	MapOverPacketFilesBPS(bitsPerSecond, args, func(p *ccsds.Packet) {
+		totalBits += 8 * int64(p.Length()+7)
+	})
+	delta := time.Now().Sub(start)
+	estBPS := float64(totalBits)/delta.Seconds()
+	fmt.Printf("%d bytes were read.  Estimated bits-per-second = %f\n", totalBits, estBPS)
 }
